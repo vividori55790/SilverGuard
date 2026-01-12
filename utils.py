@@ -3,23 +3,14 @@ import os
 import requests  # pip install requests 필요
 
 # ==================================================
-# [1] 경로 설정 (로컬/도커 호환)
-# ==================================================
-# 현재 파일(utils.py)의 위치를 기준으로 프로젝트 루트를 찾습니다.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # SilverGuard 폴더
-PROJECT_ROOT = os.path.dirname(BASE_DIR)              # 상위 폴더 (PythonUtil)
+# [수정본] 폴더가 SilverGuard 폴더 안에 있을 때 전용 설정
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # SilverGuard 폴더 위치
 
-# 데이터 폴더 설정
-DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
+# 데이터 폴더 설정 (SilverGuard 안의 data 폴더를 찾습니다)
+DATA_DIR = os.path.join(BASE_DIR, 'data')
 
-# [중요] 모델 폴더 설정
-# 로컬에서 실행 시 'local_models' 폴더를 우선적으로 찾습니다.
-LOCAL_MODEL_DIR = os.path.join(PROJECT_ROOT, 'local_models')
-
-if os.path.exists(LOCAL_MODEL_DIR):
-    MODEL_DIR = LOCAL_MODEL_DIR # 로컬 실행 모드
-else:
-    MODEL_DIR = '/app/models'   # 도커 실행 모드 (또는 기본 경로)
+# 모델 폴더 설정 (SilverGuard 안의 models 폴더를 찾습니다)
+MODEL_DIR = os.path.join(BASE_DIR, 'models')
 
 # 세부 경로 설정
 VIDEO_DIR = os.path.join(DATA_DIR, 'videos')
@@ -28,7 +19,6 @@ CSV_PATH = os.path.join(DATA_DIR, 'dataset.csv')
 
 YOLO_MODEL_PATH = os.path.join(MODEL_DIR, 'yolov8n-pose.pt')
 ML_MODEL_PATH = os.path.join(MODEL_DIR, 'fall_classifier.pkl')
-
 # ==================================================
 # [2] 시스템 설정값
 # ==================================================
