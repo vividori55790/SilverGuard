@@ -22,7 +22,7 @@ NUM_LAYERS = 2
 
 # [최적화 설정]
 SKIP_FRAMES = 3       # 3프레임마다 1번만 추론 (나머지는 이전 결과 사용)
-YOLO_IMG_SIZE = 320   # 입력 해상도 (기본 640 -> 320으로 축소하여 속도 향상)
+YOLO_IMG_SIZE = 640   # 입력 해상도 (기본 640 -> 320으로 축소하여 속도 향상)
 
 def calculate_angle(p1, p2):
     dx = p2[0] - p1[0]
