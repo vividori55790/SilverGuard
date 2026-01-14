@@ -1,0 +1,23 @@
+# Video Files (User Request)
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Python
+__pycache__/
+*.py[cod]
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project Data (Private)
+SilverGuard/data/settings.json
+SilverGuard/data/status.json
+SilverGuard/data/alert_images/*
+SilverGuard/data/videos/*
+
+# Models
+*.pt
+*.pth

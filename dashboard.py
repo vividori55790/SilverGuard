@@ -41,14 +41,15 @@ def load_settings():
             pass
     return {}
 
-def save_settings(token, chat_id, contact, privacy_mode, region1, region2):
+def save_settings(token, chat_id, contact, privacy_mode, region1, region2, extra_cam):
     data = {
         "TELEGRAM_TOKEN": token,
         "TELEGRAM_CHAT_ID": chat_id,
         "EMERGENCY_CONTACT": contact,
         "PRIVACY_MODE": privacy_mode,
         "USER_REGION_1": region1,
-        "USER_REGION_2": region2
+        "USER_REGION_2": region2,
+        "EXTRA_CAM": extra_cam
     }
     with open(utils.SETTINGS_PATH, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -60,6 +61,7 @@ default_chat_id = current_settings.get("TELEGRAM_CHAT_ID", "")
 default_privacy = current_settings.get("PRIVACY_MODE", False)
 default_region1 = current_settings.get("USER_REGION_1", "서울특별시")
 default_region2 = current_settings.get("USER_REGION_2", "중구")
+default_extra_cam = current_settings.get("EXTRA_CAM", "")
 
 tab1, tab2 = st.tabs(["📊 실시간 모니터링", "📁 사고 기록 갤러리"])
 
@@ -91,6 +93,10 @@ with tab1:
                 st.caption("카메라 화면 대신 AI가 인식한 '스켈레톤(뼈대)'만 화면에 표시합니다.")
             
             st.divider()
+            extra_cam = st.text_input("추가 카메라 (번호 또는 RTSP 주소)", value=default_extra_cam, placeholder="예: 1 또는 rtsp://admin:1234@192.168.0.10/stream")
+            st.caption("비워두면 기본 카메라(0번)만 사용합니다. 숫자는 USB캠 번호, 주소는 IP카메라입니다.")
+
+            st.divider()
             contact = st.text_input("보호자 긴급 연락처", value=default_contact)
             
             st.write("📍 위치 설정 (지역)")
@@ -104,7 +110,7 @@ with tab1:
             chat_id = st.text_input("텔레그램 챗 ID", value=default_chat_id)
             
             if st.form_submit_button("설정 저장"):
-                save_settings(telegram_token, chat_id, contact, privacy_mode, region1, region2)
+                save_settings(telegram_token, chat_id, contact, privacy_mode, region1, region2, extra_cam)
                 st.success("✅ 설정이 저장되었습니다! (main.py에 즉시 적용됩니다)")
 
 with tab2:
@@ -126,8 +132,13 @@ with tab2:
                     image = Image.open(img_path)
                     with cols[idx % 3]:
                         st.image(image, caption=f"시간: {file_name[5:-4]}", use_container_width=True)
-                        if st.button(f"삭제", key=f"del_{idx}"):
+                        # 파일명을 키로 사용하여 삭제 버튼 고유성 보장
+                        if st.button(f"삭제", key=f"del_{file_name}"):
                             os.remove(img_path)
+                            # 관련된 영상 파일도 있으면 삭제
+                            video_path = img_path.replace(".jpg", ".mp4").replace("FALL_", "FALL_VIDEO_")
+                            if os.path.exists(video_path):
+                                os.remove(video_path)
                             st.rerun()
                 except: pass
 
@@ -155,7 +166,7 @@ if st.sidebar.button("🚨 낙상 시뮬레이션 (TEST)"):
     
     # 2. 텔레그램 전송
     st.sidebar.write("📤 텔레그램 알림 전송 중...")
-    success = utils.send_telegram_alert(save_path, "🚨 [TEST] 낙상 시뮬레이션 발생!")
+    success = utils.send_telegram_alert(save_path, "🚨 [TEST] 낙상 시뮬레이션 발생!", None)
     if success:
         st.sidebar.success("✅ 텔레그램 전송 성공")
     else:

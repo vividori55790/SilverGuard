@@ -47,8 +47,8 @@ def get_telegram_settings():
         pass
     return None, None
 
-def send_telegram_alert(image_path, message):
-    """설정 파일에서 토큰을 읽어와 전송합니다."""
+def send_telegram_alert(image_path, message, gif_path=None):
+    """설정 파일에서 토큰을 읽어와 전송합니다. (gif_path가 있으면 영상도 전송)"""
     token, chat_id = get_telegram_settings()
     if not token or not chat_id:
         print("❌ 텔레그램 설정이 없습니다. 대시보드에서 설정해주세요.")
@@ -76,7 +76,20 @@ def send_telegram_alert(image_path, message):
             files = {'photo': img_file}
             data = {'chat_id': chat_id, 'caption': message}
             response = requests.post(url, files=files, data=data, timeout=10)
-            
+        
+        # 2. 영상 전송 (있을 경우)
+        if gif_path and os.path.exists(gif_path):
+            url_video = f"https://api.telegram.org/bot{token}/sendVideo"
+            with open(gif_path, 'rb') as video_file:
+                files_video = {'video': video_file}
+                data_video = {'chat_id': chat_id, 'caption': "🎥 사고 당시 상황 기록 (3초)"}
+                res_video = requests.post(url_video, files=files_video, data=data_video, timeout=60)
+                
+                if res_video.status_code == 200:
+                    print(f"🎬 동영상 전송 성공! ({gif_path})")
+                else:
+                    print(f"❌ 동영상 전송 실패: {res_video.text}")
+                
         if response.status_code == 200:
             print("🔔 텔레그램 알림 전송 성공!")
             return True
