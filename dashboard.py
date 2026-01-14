@@ -3,8 +3,21 @@ import streamlit as st
 import os
 import json
 import time
+import sys
+import numpy as np
+import cv2
 from PIL import Image
 import utils
+
+# 현재 디렉토리를 경로에 추가하여 voice_module import 가능하게 함
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+try:
+    import voice_module
+except ImportError:
+    voice_module = None
 
 st.set_page_config(page_title="SilverGuard Dashboard", layout="wide")
 
@@ -117,3 +130,45 @@ with tab2:
                             os.remove(img_path)
                             st.rerun()
                 except: pass
+
+# ==========================================
+# [사이드바] 디버깅 도구
+# ==========================================
+st.sidebar.title("🔧 디버깅 도구")
+if st.sidebar.button("🚨 낙상 시뮬레이션 (TEST)"):
+    st.sidebar.warning("⚠️ 낙상 감지 시나리오를 시작합니다...")
+    
+    # 1. 테스트 이미지 생성 (검은 화면에 텍스트)
+    if not os.path.exists(utils.ALERT_DIR):
+        os.makedirs(utils.ALERT_DIR)
+        
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(utils.ALERT_DIR, f"TEST_FALL_{timestamp}.jpg")
+    
+    # 더미 이미지 생성 (Create blank image)
+    dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
+    # Write text on image
+    cv2.putText(dummy_img, "TEST FALL DETECTION", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    cv2.imwrite(save_path, dummy_img)
+    
+    st.sidebar.write("📸 테스트 이미지 생성 완료")
+    
+    # 2. 텔레그램 전송
+    st.sidebar.write("📤 텔레그램 알림 전송 중...")
+    success = utils.send_telegram_alert(save_path, "🚨 [TEST] 낙상 시뮬레이션 발생!")
+    if success:
+        st.sidebar.success("✅ 텔레그램 전송 성공")
+    else:
+        st.sidebar.error("❌ 텔레그램 전송 실패")
+        
+    # 3. 음성 모듈 테스트
+    if voice_module:
+        st.sidebar.write("🎙️ 음성 확인 모듈 실행 중... (약 10~20초 소요)")
+        # Streamlit이 멈추는 것을 방지하기 위해 간단히 안내만 표시하고 실행
+        result = voice_module.run_voice_emergency_check(save_path)
+        st.sidebar.info(f"🗣️ 음성 모듈 결과: {result}")
+    else:
+        st.sidebar.error("❌ voice_module을 불러올 수 없습니다.")
+        
+    st.sidebar.success("✅ 시뮬레이션 종료")
+    st.rerun()
