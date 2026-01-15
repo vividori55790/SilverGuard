@@ -99,8 +99,10 @@ def run_voice_emergency_check(image_path):
         if any(word in detail for word in ["괜찮아", "어", "나 안 다쳤어", "아무렇지 않아", "문제 없어"]):
             speak("확인되었습니다. 시스템을 정상 상태로 유지합니다.")
             return "SAFE"
-        elif any(word in detail for word in ["아니", "아파", "도와줘", "살려줘", "병원"]):
-            speak("위급 상황임을 확인했습니다. 즉시 알림을 보냅니다.")
+        elif any(word in detail for word in ["아니", "아파", "도와줘", "살려줘", "병원", "119", "구조"]):
+            speak("위급 상황임을 확인했습니다. 보호자에게 즉시 알림을 보냅니다.")
+            # [긴급] 즉시 텔레그램 전송 (메인 로직과 별개로 여기서 바로 전송)
+            utils.send_telegram_alert(image_path, f"🚨 [긴급 구조 요청] 사용자가 육성으로 구조를 요청했습니다!\n🗣️ 인식된 말: \"{detail}\"")
             return "EMERGENCY"
         else:
             speak("상황 확인이 정확하지 않아 일단 보호자에게 알림을 보냅니다.")
