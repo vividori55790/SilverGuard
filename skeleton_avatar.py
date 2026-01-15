@@ -3,32 +3,42 @@ import cv2
 import numpy as np
 import os
 import json
-import time
 import utils
 import math
 
 # ==========================================
-# [1] 설정 및 라이브러리
+# [1] 설정 및 파일 경로
 # ==========================================
-try:
-    import mediapipe as mp
-    HAS_MEDIAPIPE = True
-except ImportError:
-    HAS_MEDIAPIPE = False
-    print("❌ MediaPipe가 없습니다. 자동 누끼 기능이 제한됩니다.")
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BG_IMAGE_PATH = os.path.join(BASE_DIR, "background.png") 
-FACE_IMAGE_PATH = os.path.join(BASE_DIR, "face.png")
+BG_IMAGE_PATH = os.path.join(BASE_DIR, "background.png")
 
-SKELETON_CONNECTIONS = [
-    (5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16),
-    (5, 6), (11, 12), (5, 11), (6, 12)
-]
+IMAGE_FILES = {
+    'head': 'head.png',
+    'torso': 'torso.png',
+    'l_arm_up': 'l_arm_up.png',   'l_arm_low': 'l_arm_low.png',
+    'r_arm_up': 'r_arm_up.png',   'r_arm_low': 'r_arm_low.png',
+    'l_leg_up': 'l_leg_up.png',   'l_leg_low': 'l_leg_low.png',
+    'r_leg_up': 'r_leg_up.png',   'r_leg_low': 'r_leg_low.png'
+}
 
-# 캐싱 변수
+# [핵심] 각 이미지 파일이 원래 가리키는 방향 (단위: 도)
+# 오른쪽(0도), 아래(90도), 왼쪽(180도), 위(-90도) 기준
+PART_SOURCE_ANGLES = {
+    'head': -90,        # 머리: 위쪽
+    'torso': -90,       # 몸통: 위쪽
+    'l_arm_up': 180,    # 왼팔 사진: 왼쪽(←)을 가리킴
+    'l_arm_low': 180,   # 왼팔 하박: 왼쪽(←)을 가리킴
+    'r_arm_up': 0,      # 오른팔 사진: 오른쪽(→)을 가리킴
+    'r_arm_low': 0,     # 오른팔 하박: 오른쪽(→)을 가리킴
+    'l_leg_up': -90,    # 다리: 위쪽 (골반->무릎 벡터에 맞추기 위해)
+    'l_leg_low': -90,
+    'r_leg_up': -90,
+    'r_leg_low': -90
+}
+
 _cached_bg = None
-_cached_face = None
+_assets = {}
+_assets_loaded = False
 
 def check_privacy_mode():
     try:
@@ -40,147 +50,216 @@ def check_privacy_mode():
         pass
     return False
 
-def remove_background_from_image(image):
-    """(핵심) 사진 파일의 배경을 지워주는 함수"""
-    if not HAS_MEDIAPIPE: return image # 라이브러리 없으면 원본 반환
-    
-    print("✂️ [자동 누끼] 아바타 사진의 배경을 제거하는 중...")
-    try:
-        mp_selfie_segmentation = mp.solutions.selfie_segmentation
-        # 정밀도 높음(1) 모드 사용
-        with mp_selfie_segmentation.SelfieSegmentation(model_selection=1) as segmenter:
-            # BGR -> RGB
-            results = segmenter.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-            mask = results.segmentation_mask
-            
-            # 마스크가 너무 흐릿하면 확실하게 만듦 (0.1보다 크면 사람)
-            mask = np.where(mask > 0.1, 1.0, 0.0).astype(np.float32)
-            
-            # 3채널 이미지를 4채널(BGRA)로 변환
-            b, g, r = cv2.split(image)
-            rgba = [b, g, r, mask * 255] # 알파 채널에 마스크 적용
-            dst = cv2.merge(rgba, 4)
-            
-            print("✅ 배경 제거 완료!")
-            return dst.astype(np.uint8)
-    except Exception as e:
-        print(f"⚠️ 배경 제거 실패: {e}")
-        return image
+# ==========================================
+# [2] 이미지 처리 로직
+# ==========================================
+def load_assets_safe():
+    global _assets, _assets_loaded
+    if not _assets_loaded:
+        for key, filename in IMAGE_FILES.items():
+            path = os.path.join(BASE_DIR, filename)
+            if os.path.exists(path):
+                img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                if img is not None: _assets[key] = img
+        _assets_loaded = True
 
-def overlay_transparent(background, overlay, x, y, overlay_size=None):
-    """투명 이미지를 배경 위에 합성하는 함수"""
+def get_vector_angle(p1, p2):
+    """두 점(p1->p2)의 벡터 각도를 계산 (0=Right, 90=Down, 180=Left, -90=Up)"""
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    return math.degrees(math.atan2(dy, dx))
+
+def rotate_image(image, angle):
+    """이미지 회전 (잘림 방지)"""
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+    # OpenCV 회전은 반시계 방향이 양수
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+
+    M[0, 2] += (new_w / 2) - center[0]
+    M[1, 2] += (new_h / 2) - center[1]
+
+    return cv2.warpAffine(image, M, (new_w, new_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+
+def overlay_transparent_safe(background, overlay, x, y):
+    """안전 합성 함수"""
     try:
         bg_h, bg_w, _ = background.shape
-        if overlay_size is not None:
-            overlay = cv2.resize(overlay, (overlay_size, overlay_size))
-
         h, w = overlay.shape[:2]
 
-        # 오버레이 이미지가 3채널(불투명)이면 4채널로 변환
-        if overlay.shape[2] < 4:
-            overlay = cv2.cvtColor(overlay, cv2.COLOR_BGR2BGRA)
+        if x < 0: w += x; overlay = overlay[:, -x:]; x = 0
+        if y < 0: h += y; overlay = overlay[-y:, :]; y = 0
+        if x + w > bg_w: w = bg_w - x; overlay = overlay[:, :w]
+        if y + h > bg_h: h = bg_h - y; overlay = overlay[:h, :]
+            
+        if w <= 0 or h <= 0: return background
 
-        # 화면 밖으로 나가는 좌표 처리
-        if x + w > bg_w: w = bg_w - x
-        if y + h > bg_h: h = bg_h - y
-        if x < 0 or y < 0 or w <= 0 or h <= 0: return background
-
-        # 알파 블렌딩 (합성)
-        alpha_s = overlay[:h, :w, 3] / 255.0
+        if overlay.shape[2] < 4: overlay = cv2.cvtColor(overlay, cv2.COLOR_BGR2BGRA)
+        alpha_s = overlay[:, :, 3] / 255.0
         alpha_l = 1.0 - alpha_s
 
         for c in range(0, 3):
-            background[y:y+h, x:x+w, c] = (alpha_s * overlay[:h, :w, c] +
-                                           alpha_l * background[y:y+h, x:x+w, c])
+            background[y:y+h, x:x+w, c] = (alpha_s * overlay[:, :, c] + alpha_l * background[y:y+h, x:x+w, c])
         return background
-    except:
-        return background
+    except: return background
 
-def draw_virtual_avatar(frame, kpts_xy, confs):
-    global _cached_bg, _cached_face
+def process_part(canvas, img_key, p1, p2, width_ref, scale_w, overlap=1.2):
+    """
+    [핵심 수정] 파츠별 원래 방향(PART_SOURCE_ANGLES)을 고려하여 회전
+    """
+    if img_key not in _assets: return canvas
+    img = _assets[img_key]
+
+    # 1. 뼈대(Target) 각도 계산
+    target_angle = get_vector_angle(p1, p2)
     
-    # ----------------------------------------------------
-    # 1. 배경 이미지 준비 (실제 카메라는 여기서 버려짐!)
-    # ----------------------------------------------------
+    # 2. 이미지(Source) 각도 가져오기
+    source_angle = PART_SOURCE_ANGLES.get(img_key, -90)
+
+    # 3. 회전할 각도 계산 (Target - Source)
+    # 예: 왼팔(180도) -> 아래(90도)로 가려면 -90도 회전 필요
+    rotation_angle = target_angle - source_angle
+
+    # *추가 보정*: OpenCV 회전 함수는 반시계가 양수이므로 부호 확인
+    # 수학적으로 맞추기 위해 음수 부호 적용 (y축이 아래로 증가하는 좌표계 특성)
+    final_angle = -rotation_angle
+
+    # 4. 크기 조절
+    length = math.dist(p1, p2)
+    target_h = int(length * overlap)
+    target_w = int(width_ref * scale_w)
+    
+    if target_w < 5 or target_h < 5: return canvas
+
+    resized = cv2.resize(img, (target_w, target_h))
+    rotated = rotate_image(resized, final_angle)
+
+    # 5. 중심점 배치
+    cx, cy = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+    x = int(cx - rotated.shape[1] // 2)
+    y = int(cy - rotated.shape[0] // 2)
+
+    return overlay_transparent_safe(canvas, rotated, x, y)
+
+def process_head(canvas, img_key, nose, ears, width_ref):
+    """머리 그리기 (180도 뒤집힘 방지 & 기울기 반영)"""
+    if img_key not in _assets: return canvas
+    img = _assets[img_key]
+
+    target_size = int(width_ref * 0.9)
+    if target_size < 20: target_size = 20
+    
+    angle = 0
+    if ears[0] is not None and ears[1] is not None:
+        dx = ears[1][0] - ears[0][0] # 왼쪽 귀 -> 오른쪽 귀 벡터
+        dy = ears[1][1] - ears[0][1]
+        raw_angle = math.degrees(math.atan2(dy, dx))
+        
+        # [강력 보정] 머리가 뒤집히지 않도록 각도 제한 (-45 ~ +45)
+        # 180도 근처 값이 나오면 무시하고 0으로 처리하거나 제한함
+        if raw_angle > 45: raw_angle = 45
+        elif raw_angle < -45: raw_angle = -45
+        
+        # OpenCV 회전 방향 보정
+        angle = -raw_angle
+
+    resized = cv2.resize(img, (target_size, int(target_size * 1.2)))
+    rotated = rotate_image(resized, angle)
+
+    x = int(nose[0] - rotated.shape[1] // 2)
+    y = int(nose[1] - rotated.shape[0] // 2)
+
+    return overlay_transparent_safe(canvas, rotated, x, y)
+
+def process_torso(canvas, img_key, shoulders, hips, width_ref):
+    """몸통 그리기"""
+    if img_key not in _assets: return canvas
+    img = _assets[img_key]
+
+    neck = (shoulders[0] + shoulders[1]) / 2
+    pelvis = (hips[0] + hips[1]) / 2
+    
+    target_angle = get_vector_angle(neck, pelvis)
+    source_angle = PART_SOURCE_ANGLES.get('torso', -90)
+    final_angle = -(target_angle - source_angle)
+
+    length = math.dist(neck, pelvis)
+    target_w = int(width_ref * 1.6)
+    target_h = int(length * 1.5)
+    
+    resized = cv2.resize(img, (target_w, target_h))
+    rotated = rotate_image(resized, final_angle)
+
+    cx, cy = (neck[0] + pelvis[0]) / 2, (neck[1] + pelvis[1]) / 2
+    x = int(cx - rotated.shape[1] // 2)
+    y = int(cy - rotated.shape[0] // 2)
+
+    return overlay_transparent_safe(canvas, rotated, x, y)
+
+# ==========================================
+# [3] 메인 그리기 실행
+# ==========================================
+def draw_virtual_avatar(frame, kpts_xy, confs):
+    global _cached_bg
+    load_assets_safe()
+
     if _cached_bg is None or _cached_bg.shape[:2] != frame.shape[:2]:
         if os.path.exists(BG_IMAGE_PATH):
             img = cv2.imread(BG_IMAGE_PATH)
             if img is not None:
                 _cached_bg = cv2.resize(img, (frame.shape[1], frame.shape[0]))
-                _cached_bg = cv2.convertScaleAbs(_cached_bg, alpha=0.5, beta=0) # 어둡게
-            else:
-                _cached_bg = np.full_like(frame, (30, 30, 30))
-        else:
-            _cached_bg = np.full_like(frame, (30, 30, 30))
-
-    # [중요] 실제 모습(frame) 대신 배경 이미지(_cached_bg)를 캔버스로 사용
+                _cached_bg = cv2.convertScaleAbs(_cached_bg, alpha=0.5, beta=0)
+            else: _cached_bg = np.full_like(frame, (30, 30, 30))
+        else: _cached_bg = np.full_like(frame, (30, 30, 30))
     canvas = _cached_bg.copy()
 
-    # ----------------------------------------------------
-    # 2. 얼굴 이미지 로드 및 '자동 누끼'
-    # ----------------------------------------------------
-    if _cached_face is None:
-        if os.path.exists(FACE_IMAGE_PATH):
-            # 일단 투명도 포함해서 읽기 시도
-            img = cv2.imread(FACE_IMAGE_PATH, cv2.IMREAD_UNCHANGED)
-            if img is not None:
-                # 만약 투명 배경이 없는 사진(3채널)이라면 -> AI로 배경 지우기 시도
-                if img.shape[2] == 3:
-                    img = remove_background_from_image(img)
-                _cached_face = img
-            else:
-                print("⚠️ face.png 파일을 읽을 수 없습니다.")
-
-    # ----------------------------------------------------
-    # 3. UI 및 아바타 그리기
-    # ----------------------------------------------------
-    cv2.putText(canvas, "SILVERGUARD VIRTUAL CORE", (30, 50), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 200), 2)
-    
-    if int(time.time() * 2) % 2 == 0:
-        cv2.putText(canvas, "[ON] LIVE PROTECTION", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    else:
-        cv2.putText(canvas, "[  ] LIVE PROTECTION", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 255), 2)
-
     if kpts_xy is not None and len(kpts_xy) > 0:
-        # (1) 뼈대 그리기 (몸통)
-        for p1, p2 in SKELETON_CONNECTIONS:
-            if len(kpts_xy) > max(p1, p2) and confs[p1] > 0.5 and confs[p2] > 0.5:
-                pt1 = (int(kpts_xy[p1][0]), int(kpts_xy[p1][1]))
-                pt2 = (int(kpts_xy[p2][0]), int(kpts_xy[p2][1]))
-                cv2.line(canvas, pt1, pt2, (0, 255, 0), 2)
+        # 기준: 어깨 너비
+        if confs[5]>0.5 and confs[6]>0.5:
+            shoulder_w = math.dist(kpts_xy[5], kpts_xy[6])
+        else:
+            shoulder_w = 150
 
-        # (2) 관절 그리기 (얼굴 0~4번 제외)
-        for idx, (x, y) in enumerate(kpts_xy):
-            if idx < 5: continue 
-            if idx < len(confs) and confs[idx] > 0.5:
-                cv2.circle(canvas, (int(x), int(y)), 5, (0, 255, 255), -1)
+        # --- Layer 1: 다리 ---
+        if confs[11]>0.5 and confs[13]>0.5:
+            canvas = process_part(canvas, 'l_leg_up', kpts_xy[11], kpts_xy[13], shoulder_w, 0.45)
+        if confs[12]>0.5 and confs[14]>0.5:
+            canvas = process_part(canvas, 'r_leg_up', kpts_xy[12], kpts_xy[14], shoulder_w, 0.45)
+        if confs[13]>0.5 and confs[15]>0.5:
+            canvas = process_part(canvas, 'l_leg_low', kpts_xy[13], kpts_xy[15], shoulder_w, 0.35)
+        if confs[14]>0.5 and confs[16]>0.5:
+            canvas = process_part(canvas, 'r_leg_low', kpts_xy[14], kpts_xy[16], shoulder_w, 0.35)
 
-        # (3) 얼굴 이미지 합성
-        nose_x, nose_y = kpts_xy[0]
-        nose_conf = confs[0]
-        
-        # 어깨 너비로 얼굴 크기 계산
-        face_size = 120
-        if confs[5] > 0.5 and confs[6] > 0.5:
-            shoulder_width = math.dist(kpts_xy[5], kpts_xy[6])
-            face_size = int(shoulder_width * 1.8) # 1.8배 크기 (대두 효과)
+        # --- Layer 2: 몸통 ---
+        if confs[5]>0.5 and confs[6]>0.5 and confs[11]>0.5 and confs[12]>0.5:
+            shoulders = (kpts_xy[5], kpts_xy[6])
+            hips = (kpts_xy[11], kpts_xy[12])
+            canvas = process_torso(canvas, 'torso', shoulders, hips, shoulder_w)
 
-        if nose_conf > 0.5 and _cached_face is not None:
-            top_left_x = int(nose_x - face_size // 2)
-            top_left_y = int(nose_y - face_size // 2)
-            canvas = overlay_transparent(canvas, _cached_face, top_left_x, top_left_y, face_size)
-        elif nose_conf > 0.5:
-            # 이미지가 없으면 기본 원
-            cv2.circle(canvas, (int(nose_x), int(nose_y)), 25, (255, 255, 255), -1)
-            
+        # --- Layer 3: 머리 ---
+        if confs[0] > 0.5:
+            nose = kpts_xy[0]
+            l_ear = kpts_xy[3] if confs[3]>0.5 else None
+            r_ear = kpts_xy[4] if confs[4]>0.5 else None
+            canvas = process_head(canvas, 'head', nose, (l_ear, r_ear), shoulder_w)
+
+        # --- Layer 4: 팔 (방향 보정 자동 적용됨) ---
+        if confs[5]>0.5 and confs[7]>0.5:
+            canvas = process_part(canvas, 'l_arm_up', kpts_xy[5], kpts_xy[7], shoulder_w, 0.35)
+        if confs[7]>0.5 and confs[9]>0.5:
+            canvas = process_part(canvas, 'l_arm_low', kpts_xy[7], kpts_xy[9], shoulder_w, 0.30)
+
+        if confs[6]>0.5 and confs[8]>0.5:
+            canvas = process_part(canvas, 'r_arm_up', kpts_xy[6], kpts_xy[8], shoulder_w, 0.35)
+        if confs[8]>0.5 and confs[10]>0.5:
+            canvas = process_part(canvas, 'r_arm_low', kpts_xy[8], kpts_xy[10], shoulder_w, 0.30)
     else:
-        # 대기 화면
-        text = "SEARCHING TARGET..."
-        font_scale = 0.7
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-        center_x = (frame.shape[1] - text_w) // 2
-        center_y = (frame.shape[0] + text_h) // 2
-        cv2.putText(canvas, text, (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (100, 255, 100), 1)
+        cv2.putText(canvas, "SEARCHING...", (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 100), 2)
 
+    cv2.putText(canvas, "SILVERGUARD AVATAR", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 200), 2)
     return canvas
