@@ -102,6 +102,18 @@ class SilverGuardEngine:
                 if self.frame_count % 30 == 0:
                     utils.update_heartbeat()
                     self.is_privacy_mode = skeleton_avatar.check_privacy_mode()
+                    
+                    # Update Sensitivity from Settings
+                    try:
+                        with open(utils.SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                            settings = json.load(f)
+                            # Apply to all cameras
+                            for cam in self.cams:
+                                cam['detector'].set_sensitivity(
+                                    settings.get("AI_CONFIDENCE", 0.65),
+                                    settings.get("AI_STRICTNESS", "Medium")
+                                )
+                    except: pass
                 
                 # Sync offline data (약 3초마다)
                 if self.frame_count % 100 == 0:
@@ -128,7 +140,8 @@ class SilverGuardEngine:
                         frame = frame[:, frame.shape[1]//2:]
 
                     # 감지기 실행
-                    pred_cls, conf = cam_data['detector'].process(frame)
+                    # 감지기 실행 (Returns: pred_cls, conf, bbox, kpts, confs, is_detected, reason)
+                    pred_cls, conf, _, _, _, _, reason = cam_data['detector'].process(frame, timestamp=time.time())
                     
                     # 감지된 정보 가져오기
                     kpts = cam_data['detector'].last_kpts_xy
@@ -136,7 +149,7 @@ class SilverGuardEngine:
                     bbox = cam_data['detector'].last_bbox
 
                     # 낙상 판단 로직 처리
-                    self._handle_detection(cam_data, pred_cls, conf, frame, kpts, confs, bbox)
+                    self._handle_detection(cam_data, pred_cls, conf, frame, kpts, confs, bbox, reason)
 
                     # 화면 그리기 (프라이버시 모드 적용)
                     display = self._draw_overlay(frame, cam_data)
@@ -165,13 +178,18 @@ class SilverGuardEngine:
             cv2.destroyAllWindows()
             print("👋 시스템을 종료합니다.")
 
-    def _handle_detection(self, cam_data, pred_cls, conf, frame, kpts, confs, bbox):
+    def _handle_detection(self, cam_data, pred_cls, conf, frame, kpts, confs, bbox, reason=""):
         # State Management
         cam_data['status'], cam_data['color'] = "Monitoring...", (0, 255, 0)
         
         # pred_cls == 1 이면 'Fall' 이라고 가정
         if pred_cls == 1 and conf > 0.7:
-            cam_data['status'], cam_data['color'] = f"FALL! ({conf*100:.0f}%)", (0, 0, 255)
+            # 상태 메시지에 감지 원인(reason) 포함
+            status_text = f"FALL! ({conf*100:.0f}%)"
+            if reason:
+                 status_text += f" [{reason}]"
+            
+            cam_data['status'], cam_data['color'] = status_text, (0, 0, 255)
             
             if not cam_data['fall_state']:
                 cam_data['fall_state'] = True

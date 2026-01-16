@@ -2,7 +2,7 @@
     "TELEGRAM_TOKEN": "8185922880:AAGqWmKbu4UpFNDefv7Y0AdxFsmIXrt_8Gs",
     "TELEGRAM_CHAT_ID": "8522048951",
     "EMERGENCY_CONTACT": "010-0000-0000",
-    "PRIVACY_MODE": true,
+    "PRIVACY_MODE": false,
     "USER_REGION_1": "서울특별시",
     "USER_REGION_2": "노원구",
     "EXTRA_CAM": ""

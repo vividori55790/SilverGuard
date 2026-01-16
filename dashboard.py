@@ -61,7 +61,11 @@ default_chat_id = current_settings.get("TELEGRAM_CHAT_ID", "")
 default_privacy = current_settings.get("PRIVACY_MODE", False)
 default_region1 = current_settings.get("USER_REGION_1", "서울특별시")
 default_region2 = current_settings.get("USER_REGION_2", "중구")
+default_region2 = current_settings.get("USER_REGION_2", "중구")
 default_extra_cam = current_settings.get("EXTRA_CAM", "")
+# Sensitivity Settings
+default_conf = current_settings.get("AI_CONFIDENCE", 0.65)
+default_strictness = current_settings.get("AI_STRICTNESS", "Medium")
 
 tab1, tab2 = st.tabs(["📊 실시간 모니터링", "📁 사고 기록 갤러리"])
 
@@ -107,15 +111,55 @@ with tab1:
             with col_loc2:
                 region2 = st.text_input("시/군/구", value=default_region2, placeholder="예: 강남구")
 
+            # Sensitivity Controls
+            st.write("🎛️ AI 민감도 설정")
+            
+            # 1. Confidence Threshold
+            ai_conf = st.slider("낙상 확신도 기준 (높을수록 신중함)", 
+                                min_value=0.4, max_value=0.9, 
+                                value=float(default_conf), step=0.05, 
+                                help="AI가 '낙상이다!'라고 확신하는 정도입니다. 너무 낮으면 오작동이 늘고, 너무 높으면 낙상을 놓칠 수 있습니다.")
+            
+            # 2. Strictness (Heuristics)
+            strictness_options = ["Low (민감함)", "Medium (권장)", "High (엄격함)"]
+            
+            # Map string to index
+            strict_idx = 1 # Medium default
+            if "Low" in default_strictness: strict_idx = 0
+            if "High" in default_strictness: strict_idx = 2
+            
+            strictness_ui = st.select_slider("오작동 방지 강도 (Strictness)", 
+                                            options=strictness_options, 
+                                            value=strictness_options[strict_idx],
+                                            help="앉기/눕기 등을 낙상으로 오인하지 않도록 하는 안전장치 강도입니다.")
+            
+            # Parse back to simple string
+            ai_strictness = "Medium"
+            if "Low" in strictness_ui: ai_strictness = "Low"
+            elif "High" in strictness_ui: ai_strictness = "High"
+
             telegram_token = st.text_input("텔레그램 봇 토큰", value=default_token, type="password")
             chat_id = st.text_input("텔레그램 챗 ID", value=default_chat_id)
             
             if st.form_submit_button("설정 저장"):
-                save_settings(telegram_token, chat_id, contact, privacy_mode, region1, region2, extra_cam)
-                st.success("✅ 설정이 저장되었습니다! (화면이 새로고침 됩니다)")
-                time.sleep(1.0) # 사용자가 메시지를 볼 시간을 줌
-                st.rerun()      # ✅ [핵심 수정] 강제 새로고침으로 토글 상태 즉시 반영
-
+                # Save all
+                new_settings = {
+                    "TELEGRAM_TOKEN": telegram_token,
+                    "TELEGRAM_CHAT_ID": chat_id,
+                    "EMERGENCY_CONTACT": contact,
+                    "PRIVACY_MODE": privacy_mode,
+                    "USER_REGION_1": region1,
+                    "USER_REGION_2": region2,
+                    "EXTRA_CAM": extra_cam,
+                    "AI_CONFIDENCE": ai_conf,
+                    "AI_STRICTNESS": ai_strictness
+                }
+                with open(utils.SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                    json.dump(new_settings, f, ensure_ascii=False, indent=4)
+                    
+                st.success("✅ 설정이 저장되었습니다! 엔진에 즉시 반영됩니다.")
+                time.sleep(1.0)
+                st.rerun()
 with tab2:
     st.header("🚨 감지된 낙상 사고 기록")
     if st.button("갤러리 새로고침"):
