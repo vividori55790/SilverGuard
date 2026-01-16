@@ -1,67 +1,107 @@
-import pandas as pd
-import joblib
-import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import numpy as np
-from sklearn.model_selection import train_test_split, GroupKFold
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-import utils
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, f1_score
+from model import LightSTGCN  # model.py에서 클래스 임포트
 
-def run():
-    print("🚀 모델 학습 (Velocity Feature 포함) 시작...")
+# 도커 경로 설정
+DATA_DIR = '/app/data'
+X_PATH = os.path.join(DATA_DIR, 'X_final_aug.npy')
+Y_PATH = os.path.join(DATA_DIR, 'y_final_aug.npy')
+MODEL_SAVE_PATH = os.path.join(DATA_DIR, 'final_light_stgcn.pth')
+
+BATCH_SIZE = 16
+EPOCHS = 70
+LEARNING_RATE = 0.001
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+class FallDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.LongTensor(y)
+    def __len__(self): return len(self.y)
+    def __getitem__(self, idx): return self.X[idx], self.y[idx]
+
+def train_final():
+    print(f"🚀 [Train] Light ST-GCN 학습 시작 (Device: {DEVICE})")
     
-    if not os.path.exists(utils.CSV_PATH):
-        print("❌ 데이터 파일이 없습니다.")
+    if not os.path.exists(X_PATH):
+        print("❌ 전처리된 데이터가 없습니다. preprocess.py가 먼저 실행되어야 합니다.")
         return
 
-    df = pd.read_csv(utils.CSV_PATH)
+    X = np.load(X_PATH)
+    y = np.load(Y_PATH)
     
-    # 결측치(NaN) 제거 (첫 프레임은 속도 계산 불가라 0이거나 NaN일 수 있음)
-    df = df.dropna()
+    # Feature Selection: (x, y, conf, vx, vy, ax, ay) = 7 features * 17 joints = 119
+    feature_dim = 17 * 7
+    X = X[:, :, :feature_dim]
     
-    print(f"   - 총 데이터 개수: {len(df)}")
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
     
-    # Feature와 Target 분리
-    # label, video_name을 제외한 모든 컬럼이 입력값(X)
-    X = df.drop(['label', 'video_name'], axis=1)
-    y = df['label']
-    
-    # 그룹(영상) 정보: 같은 영상의 프레임이 Train/Test에 섞이지 않게 분리
-    groups = df['video_name']
-    
-    # GroupKFold를 이용한 데이터 분할 (Data Leakage 방지)
-    gkf = GroupKFold(n_splits=5)
-    train_idx, test_idx = next(gkf.split(X, y, groups))
-    
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-    
-    print(f"   - 학습 데이터: {len(X_train)}개, 테스트 데이터: {len(X_test)}개")
+    class_counts = np.bincount(y_train)
+    weights = 1. / (class_counts + 1e-6) # 0으로 나누기 방지
+    samples_weights = [weights[t] for t in y_train]
+    sampler = WeightedRandomSampler(samples_weights, len(samples_weights))
 
-    # 모델 학습
-    model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-    model.fit(X_train, y_train)
-
-    # 평가
-    y_pred = model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
+    train_loader = DataLoader(FallDataset(X_train, y_train), batch_size=BATCH_SIZE, sampler=sampler)
+    val_loader = DataLoader(FallDataset(X_val, y_val), batch_size=BATCH_SIZE)
     
-    print(f"\n✨ 모델 정확도: {acc*100:.2f}%")
-    print(classification_report(y_test, y_pred))
+    model = LightSTGCN(in_channels=7, device=DEVICE).to(DEVICE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     
-    # [중요] 어떤 피처가 낙상 판단에 중요한지 확인
-    print("\n🔍 Feature Importance (상위 5개):")
-    importances = model.feature_importances_
-    feature_names = X.columns
-    sorted_idx = np.argsort(importances)[::-1]
+    best_f1 = 0.0
     
-    for i in range(5):
-        idx = sorted_idx[i]
-        print(f"   {i+1}. {feature_names[idx]}: {importances[idx]:.4f}")
+    for epoch in range(EPOCHS):
+        model.train()
+        train_loss = 0
+        
+        for inputs, targets in train_loader:
+            inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+            optimizer.zero_grad()
+            
+            # MixUp
+            if np.random.random() > 0.5:
+                lam = np.random.beta(1.0, 1.0)
+                index = torch.randperm(inputs.size(0)).to(DEVICE)
+                mixed_inputs = lam * inputs + (1 - lam) * inputs[index]
+                outputs = model(mixed_inputs)
+                loss = lam * criterion(outputs, targets) + (1 - lam) * criterion(outputs, targets[index])
+            else:
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+            
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            
+        scheduler.step()
+        
+        model.eval()
+        preds_arr, targets_arr = [], []
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs = inputs.to(DEVICE)
+                outputs = model(inputs)
+                preds = torch.argmax(outputs, dim=1)
+                preds_arr.extend(preds.cpu().numpy())
+                targets_arr.extend(targets.cpu().numpy())
+        
+        val_f1 = f1_score(targets_arr, preds_arr, average='macro')
+        print(f"Epoch {epoch+1:02d}/{EPOCHS} | Loss: {train_loss/len(train_loader):.4f} | Val F1: {val_f1:.4f}")
+        
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            print("   --> ⭐ Model Saved!")
 
-    # 모델 저장
-    joblib.dump(model, utils.ML_MODEL_PATH)
-    print(f"💾 모델 저장 완료: {utils.ML_MODEL_PATH}")
+    print(f"\n✅ 학습 완료. 저장 경로: {MODEL_SAVE_PATH}")
+    print(classification_report(targets_arr, preds_arr, target_names=['Normal', 'Fall'], zero_division=0))
 
-if __name__ == '__main__':
-    run()
+if __name__ == "__main__":
+    train_final()

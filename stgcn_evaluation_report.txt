@@ -1,0 +1,16 @@
+ST-GCN Evaluation Results (Improved Logic)
+Accuracy: 0.8374
+
+Confusion Matrix:
+[[966  99]
+ [125 188]]
+
+Classification Report:
+              precision    recall  f1-score   support
+
+      Normal     0.8854    0.9070    0.8961      1065
+        Fall     0.6551    0.6006    0.6267       313
+
+    accuracy                         0.8374      1378
+   macro avg     0.7702    0.7538    0.7614      1378
+weighted avg     0.8331    0.8374    0.8349      1378

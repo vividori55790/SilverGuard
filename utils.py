@@ -19,6 +19,7 @@ SETTINGS_PATH = os.path.join(DATA_DIR, 'settings.json')
 STATUS_PATH = os.path.join(DATA_DIR, 'status.json') 
 
 YOLO_MODEL_PATH = os.path.join(MODEL_DIR, 'yolo11n-pose.pt')
+CSV_PATH = os.path.join(DATA_DIR, 'dataset.csv')
 
 # ==================================================
 # [2] 시스템 설정값
