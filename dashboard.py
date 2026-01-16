@@ -88,6 +88,7 @@ with tab1:
     with col2:
         st.subheader("🛠️ 통합 설정")
         with st.form("settings_form"):
+            # 토글 값 설정
             privacy_mode = st.toggle("🛡️ 버추얼 모드 (사생활 보호)", value=default_privacy)
             if privacy_mode:
                 st.caption("카메라 화면 대신 AI가 인식한 '스켈레톤(뼈대)'만 화면에 표시합니다.")
@@ -111,7 +112,9 @@ with tab1:
             
             if st.form_submit_button("설정 저장"):
                 save_settings(telegram_token, chat_id, contact, privacy_mode, region1, region2, extra_cam)
-                st.success("✅ 설정이 저장되었습니다! (main.py에 즉시 적용됩니다)")
+                st.success("✅ 설정이 저장되었습니다! (화면이 새로고침 됩니다)")
+                time.sleep(1.0) # 사용자가 메시지를 볼 시간을 줌
+                st.rerun()      # ✅ [핵심 수정] 강제 새로고침으로 토글 상태 즉시 반영
 
 with tab2:
     st.header("🚨 감지된 낙상 사고 기록")

@@ -37,7 +37,6 @@ class SilverGuardEngine:
             except: pass
 
         # Multi-Camera Setup
-        # List of {'cap': VideoCapture, 'detector': FallDetector, 'buffer': deque, 'status': ..., 'id': int}
         self.cams = []
         
         # Cam 0 (Default)
@@ -52,7 +51,7 @@ class SilverGuardEngine:
             'id': 0,
             'cap': cap0,
             'detector': FallDetector(),
-            'buffer': deque(maxlen=45), # 3 sec buffer
+            'buffer': deque(maxlen=150), # 버퍼 150프레임 (약 5초)
             'test_mode': using_test,
             'status': "Initializing",
             'color': (200, 200, 200),
@@ -76,7 +75,7 @@ class SilverGuardEngine:
                     'id': 1,
                     'cap': cap1,
                     'detector': FallDetector(),
-                    'buffer': deque(maxlen=45),
+                    'buffer': deque(maxlen=150), 
                     'test_mode': False,
                     'status': "Initializing",
                     'color': (200, 200, 200),
@@ -87,11 +86,10 @@ class SilverGuardEngine:
 
         # Global Runtime State
         self.frame_count = 0
-        self.skip_frames = 2
         self.last_alert_time = 0
         self.alert_cooldown = 60
         self.is_privacy_mode = False
-        
+
     def run(self):
         print(f"🟢 모니터링 시작! (카메라 {len(self.cams)}대 가동 중)")
         sync_unsent_data()
@@ -100,10 +98,12 @@ class SilverGuardEngine:
             while True:
                 self.frame_count += 1
                 
-                # Check Settings periodically
+                # Check Settings periodically (약 1초마다)
                 if self.frame_count % 30 == 0:
                     utils.update_heartbeat()
                     self.is_privacy_mode = skeleton_avatar.check_privacy_mode()
+                
+                # Sync offline data (약 3초마다)
                 if self.frame_count % 100 == 0:
                     sync_unsent_data()
 
@@ -120,33 +120,31 @@ class SilverGuardEngine:
                             frame = np.zeros((480, 640, 3), dtype=np.uint8)
                             cv2.putText(frame, "No Signal", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                     
-                    # Resize to standard size for consistency
+                    # Resize to standard size
                     frame = cv2.resize(frame, (640, 480))
                     
                     # Preprocessing
                     if utils.CROP_RIGHT_HALF:
                         frame = frame[:, frame.shape[1]//2:]
 
-                    # Video Buffering
-                    cam_data['buffer'].append(frame.copy())
+                    # 감지기 실행
+                    pred_cls, conf = cam_data['detector'].process(frame)
                     
-                    # Inference
-                    if self.frame_count % self.skip_frames == 0:
-                        pred_cls, conf, bbox, kpts_xy, confs, is_detected = cam_data['detector'].process_frame(frame, self.skip_frames)
-                        
-                        if is_detected:
-                            self._handle_detection(cam_data, pred_cls, conf, frame, kpts_xy, confs, bbox)
-                        else:
-                            # [BUG FIX] 사람이 사라지면 낙상 상태 초기화
-                            # 단, 즉시 해제보다는 카운터를 두는 게 좋지만 여기선 단순화
-                            cam_data['fall_state'] = False 
-                            cam_data['status'] = "Monitoring..."
-                            cam_data['color'] = (0, 255, 0)
-                    
-                    # Visualization Prepared
-                    # We use cached detection data from detector object or cam_data state
-                    # But detector stores last results.
-                    frames_to_show.append(self._draw_overlay(frame, cam_data))
+                    # 감지된 정보 가져오기
+                    kpts = cam_data['detector'].last_kpts_xy
+                    confs = cam_data['detector'].last_confs
+                    bbox = cam_data['detector'].last_bbox
+
+                    # 낙상 판단 로직 처리
+                    self._handle_detection(cam_data, pred_cls, conf, frame, kpts, confs, bbox)
+
+                    # 화면 그리기 (프라이버시 모드 적용)
+                    display = self._draw_overlay(frame, cam_data)
+
+                    # 버퍼 저장 (영상 녹화용) - 처리된 화면(display)을 저장
+                    cam_data['buffer'].append(display.copy())
+
+                    frames_to_show.append(display)
 
                 # Display Merged
                 if len(frames_to_show) > 1:
@@ -171,71 +169,90 @@ class SilverGuardEngine:
         # State Management
         cam_data['status'], cam_data['color'] = "Monitoring...", (0, 255, 0)
         
+        # pred_cls == 1 이면 'Fall' 이라고 가정
         if pred_cls == 1 and conf > 0.7:
             cam_data['status'], cam_data['color'] = f"FALL! ({conf*100:.0f}%)", (0, 0, 255)
             
             if not cam_data['fall_state']:
                 cam_data['fall_state'] = True
                 print(f"🚨 카메라 {cam_data['id']}에서 낙상 감지됨!")
-                self._trigger_alert(frame, cam_data['buffer'])
+                
+                # 알림 전송 시 프라이버시 모드면 '안전한 이미지(스켈레톤)'를 전송
+                if self.is_privacy_mode:
+                    safe_img = skeleton_avatar.render_privacy_frame(frame.shape, kpts, confs)
+                    self._trigger_alert(safe_img, cam_data['buffer'])
+                else:
+                    self._trigger_alert(frame, cam_data['buffer'])
         else:
             cam_data['fall_state'] = False
 
     def _trigger_alert(self, frame, buffer):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # [추가] 메시지용 가독성 좋은 시간 포맷
+        readable_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         save_path = os.path.join(utils.ALERT_DIR, f"FALL_{timestamp}.jpg")
         
-        # Save Trigger Frame
         if not cv2.imwrite(save_path, frame):
             print(f"❌ 이미지 저장 실패: {save_path}")
             return
             
         print(f"📸 낙상 이미지 저장됨: {save_path}")
         
-        # Save 3-sec Video
+        # Save Video Logic
         video_path = None
-        if len(buffer) > 10:
+        if len(buffer) > 20: 
             video_save_path = os.path.join(utils.ALERT_DIR, f"FALL_VIDEO_{timestamp}.mp4")
             try:
                 h, w, _ = buffer[0].shape
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(video_save_path, fourcc, 15.0, (w, h))
+                
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                    out = cv2.VideoWriter(video_save_path, fourcc, 30.0, (w, h))
+                    if not out.isOpened(): raise Exception("avc1 open failed")
+                except:
+                    print("⚠️ avc1 코덱 실패, mp4v로 전환합니다.")
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out = cv2.VideoWriter(video_save_path, fourcc, 30.0, (w, h))
+
                 for f_img in buffer:
                     out.write(f_img)
                 out.release()
                 
-                # 파일 생성 확인
                 if os.path.exists(video_save_path) and os.path.getsize(video_save_path) > 0:
                     video_path = video_save_path
-                    print(f"🎥 낙상 영상 저장 완료: {video_path} (크기: {os.path.getsize(video_path)} bytes)")
-                else:
-                    print("⚠️ 영상 파일이 생성되지 않았거나 비어있습니다.")
-
+                    print(f"🎥 낙상 영상 저장 완료: {video_path}")
             except Exception as e:
                 print(f"⚠️ 영상 저장 실패: {e}")
 
         # Voice Check
-        # run_voice_emergency_check only takes one argument (image_path) in voice_module.py
-        # Check signature: run_voice_emergency_check(image_path)
         voice_res = run_voice_emergency_check(save_path)
         
+        # [추가] 알림 메시지에 시간 포함
+        alert_msg = f"🚨 낙상 발생! (시간: {readable_time})\n결과: {voice_res}"
+
         # Dispatch Alert
         if is_internet_available():
             if time.time() - self.last_alert_time > self.alert_cooldown:
-                utils.send_telegram_alert(save_path, f"🚨 낙상 발생! (결과: {voice_res})", video_path)
+                # 온라인이면 바로 전송
+                utils.send_telegram_alert(save_path, alert_msg, video_path)
                 self.last_alert_time = time.time()
         else:
             if time.time() - self.last_alert_time > self.alert_cooldown:
-                activate_offline_safety_mode(save_path, voice_res)
+                # 오프라인이면 대기열에 저장 (메시지+영상경로 함께 전달)
+                # 오프라인 모드 메시지를 조금 다르게 하고 싶다면 여기서 수정 가능
+                offline_msg = f"낙상 감지! (시간: {readable_time})\n결과: {voice_res}"
+                activate_offline_safety_mode(save_path, offline_msg, video_path)
                 self.last_alert_time = time.time()
 
     def _draw_overlay(self, frame, cam_data):
         detector = cam_data['detector']
         
         if self.is_privacy_mode:
-            # use detector's last known state from previous frame process
             kpts = detector.last_kpts_xy
             confs = detector.last_confs
+            # 아바타(종이인형) 모드로 그리기
             display_frame = skeleton_avatar.draw_virtual_avatar(frame, kpts, confs)
         else:
             display_frame = frame.copy()
@@ -246,14 +263,15 @@ class SilverGuardEngine:
                 confs = detector.last_confs
                 
                 # Draw points
-                for idx, (x, y) in enumerate(kpts):
-                    if confs[idx] > 0.5:
-                        cv2.circle(display_frame, (int(x), int(y)), 3, (0, 255, 255), -1)
+                if kpts is not None:
+                    for idx, (x, y) in enumerate(kpts):
+                        if confs[idx] > 0.5:
+                            cv2.circle(display_frame, (int(x), int(y)), 3, (0, 255, 255), -1)
                 
                 # Draw Box
                 if bbox is not None:
-                     cv2.rectangle(display_frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), cam_data['color'], 2)
-                     cv2.putText(display_frame, cam_data['status'], (int(bbox[0]), int(bbox[1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cam_data['color'], 2)
+                    cv2.rectangle(display_frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), cam_data['color'], 2)
+                    cv2.putText(display_frame, cam_data['status'], (int(bbox[0]), int(bbox[1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cam_data['color'], 2)
         
         # Cam ID Label
         cv2.putText(display_frame, f"CAM {cam_data['id']}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
