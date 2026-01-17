@@ -10,8 +10,8 @@
     "USER_REGION_1": "서울특별시",
     "USER_REGION_2": "노원구",
     "AI_CONFIDENCE": 0.9,
-    "AI_STRICTNESS": "Medium",
+    "AI_STRICTNESS": "High",
     "AUTO_CALL_ENABLED": true,
-    "TARGET_FPS": 30,
+    "TARGET_FPS": 26,
     "DASHBOARD_PW": "silver1234"
 }

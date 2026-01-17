@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import json # [New]
 
 # [Fix] Windows Unicode Error
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
@@ -9,22 +10,102 @@ sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 import pandas as pd
 import numpy as np
 import torch
+
+# ... existing imports ...
+import shutil
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score # [New]
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from tqdm import tqdm
 from stgcn import STGCN
 import utils
 
 # Config
-WINDOW_SIZE = 30 # 1 second approx
-STRIDE = 10      # Overlap for data augmentation
+WINDOW_SIZE = 30
+STRIDE = 10
 BATCH_SIZE = 32
-EPOCHS = 30      # Increased from 10
-LR = 0.001       # Reduced slightly for stability with 30 epochs
+EPOCHS = 30
+LR = 0.001
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def optimize_thresholds(model):
+    """
+    Find optimal confidence threshold using User Verified Data (Field Data).
+    Instead of relying on a fixed 0.65, we adapt to the user's specific environment.
+    """
+    # Load ONLY field data for calibration
+    print("   ... 사용자 피드백 데이터 로드 중 ...")
+    X_field, y_field = load_field_data()
+    if len(X_field) == 0:
+        print("   ⚠️ 튜닝할 사용자 데이터(오작동/실제낙상)가 부족하여 최적화를 건너뜁니다.")
+        return None
+        
+    # Get confidences
+    model.eval()
+    fall_probs = []
+    
+    # Batch processing to avoid OOM if field data is huge (unlikely but safe)
+    batch_size = 32
+    with torch.no_grad():
+        for i in range(0, len(X_field), batch_size):
+            batch_X = X_field[i:i+batch_size]
+            inputs = torch.tensor(batch_X, dtype=torch.float32).unsqueeze(-1).permute(0, 3, 1, 2, 4).to(DEVICE)
+            outputs = model(inputs) # (N, 2)
+            probs = torch.nn.functional.softmax(outputs, dim=1)
+            fall_probs.extend(probs[:, 1].cpu().numpy())
+            
+    fall_probs = np.array(fall_probs)
+    
+    # Grid Search for Best Threshold (0.40 to 0.95)
+    best_t = 0.65
+    best_f1 = 0.0
+    
+    # We prioritize Precision slightly more to avoid False Alarms in real home usage?
+    # Or Recall? Falls are critical. Recall is Key.
+    # But F1 balances both.
+    
+    for t in np.arange(0.40, 0.96, 0.01):
+        preds = (fall_probs >= t).astype(int)
+        f1 = f1_score(y_field, preds, zero_division=0)
+        
+        # If F1 is equal, prefer higher threshold (Conservative / Less False Alarms)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_t = t
+        elif f1 == best_f1 and f1 > 0:
+            # Tie-breaking: Choose the one closer to default or Higher?
+            # Higher threshold is safer against false alarms.
+            best_t = max(best_t, t)
+
+    print(f"   ► 사용자 데이터 기준 최적 F1: {best_f1*100:.1f}% (최적 임계값: {best_t:.2f})")
+    
+    # Update settings.json
+    try:
+        if os.path.exists(utils.SETTINGS_PATH):
+            with open(utils.SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+        else:
+            settings = {}
+            
+        old_t = settings.get("AI_CONFIDENCE", 0.65)
+        
+        # Apply change if meaningful diff (> 0.02)
+        if abs(old_t - best_t) >= 0.01:
+            print(f"   💡 [시스템 최적화] AI 민감도 자동 조정: {old_t:.2f} -> {best_t:.2f}")
+            settings["AI_CONFIDENCE"] = float(best_t)
+            with open(utils.SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False)
+            return best_t
+        else:
+            print(f"   (현재 민감도 {old_t:.2f}가 이미 최적입니다)")
+    except Exception as e:
+        print(f"   ⚠️ 설정 저장 실패: {e}")
+        
+    return None
+
+
 
 def load_field_data():
     """Load user-verified samples from VERIFIED_DIR and FALSE_ALARM_DIR"""
@@ -78,6 +159,10 @@ def load_field_data():
     print("🔍 Scanning User Verified Data...")
     process_dir(utils.VERIFIED_DIR, 1)    # Verified Falls
     process_dir(utils.FALSE_ALARM_DIR, 0) # Verified Normal
+    
+    # [NEW] Scan Archives (Cumulative Learning)
+    process_dir(utils.ARCHIVE_VERIFIED, 1)
+    process_dir(utils.ARCHIVE_FALSE, 0)
     
     if len(field_data) == 0:
         return np.array([]), np.array([])
@@ -290,63 +375,47 @@ def train():
         print("⚠️ 성능 향상이 관찰되지 않았습니다. 기존 모델을 유지합니다.")
         print("   (Tip: 검증된 데이터를 더 많이 추가하면 성능이 오를 수 있습니다.)")
 
-if __name__ == "__main__":
-    train()
-            targets = targets.to(DEVICE)
-            
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += targets.size(0)
-            correct += (predicted == targets).sum().item()
-            
-        acc = 100 * correct / total
-        print(f"   - Loss: {total_loss/len(train_loader):.4f}, Train Acc: {acc:.2f}%")
-        
-        # Validation
-        val_acc = evaluate(model, test_loader)
-        
-        # Save best
-        if val_acc > best_acc:
-            best_acc = val_acc
-            # Temp save
-            torch.save(model.state_dict(), "temp_best.pth")
-            
-    print(f"🏁 Training Finished. New Best Acc: {best_acc:.2f}% (Old: {current_acc:.2f}%)")
+    # 🔧 [Step 4] Sensitivity Auto-Tuning
+    print("\n🔧 [4/4] 민감도(Threshold) 정밀 튜닝 (Heuristic Optimization)")
     
-    if best_acc >= current_acc: # Allow equal if it trained on more data
-        print("✅ New model is better or equal. Updating system model.")
-        if os.path.exists("temp_best.pth"):
-            # Load bytes and save to final
-            try:
-                state = torch.load("temp_best.pth")
-                torch.save(state, model_path)
-                print("💾 Model Updated Successfully.")
-            except: pass
-    else:
-        print("⚠️ New model performance is worse. Discarding changes.")
+    # Pick the winner model
+    active_model = model if improved else None
+    
+    # If not improved, try to load old model to tune it
+    if not active_model and os.path.exists(model_path):
+        try:
+             active_model = STGCN(in_channels=3, num_class=2).to(DEVICE)
+             active_model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        except: pass
+
+    if active_model:
+        optimize_thresholds(active_model)
         
-    if os.path.exists("temp_best.pth"):
-        os.remove("temp_best.pth")
+    # [Step 5] Archive Data (Clean up active folders)
+    print("\n🧹 학습 데이터 아카이빙 (데이터 정리)...")
+    utils.ensure_dirs()
+    
+    def archive_files(src_dir, dst_dir):
+        if not os.path.exists(src_dir): return
+        files = os.listdir(src_dir)
+        count = 0
+        for f in files:
+            src = os.path.join(src_dir, f)
+            dst = os.path.join(dst_dir, f)
+            try:
+                if os.path.isfile(src):
+                    if os.path.exists(dst): os.remove(dst) # Overwrite
+                    shutil.move(src, dst)
+                    count += 1
+            except Exception as e:
+                print(f"   ⚠️ 파일 이동 실패 ({f}): {e}")
+        if count > 0:
+            print(f"   ► {count}개 파일을 아카이브로 이동: {os.path.basename(dst_dir)}")
 
-def evaluate(model, loader):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for inputs, targets in loader:
-            inputs = inputs.unsqueeze(-1).to(DEVICE)
-            targets = targets.to(DEVICE)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs.data, 1)
-            total += targets.size(0)
-            correct += (predicted == targets).sum().item()
-    return 100 * correct / total
+    archive_files(utils.VERIFIED_DIR, utils.ARCHIVE_VERIFIED)
+    archive_files(utils.FALSE_ALARM_DIR, utils.ARCHIVE_FALSE)
+    
+    print("✅ 모든 작업 완료.")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     train()

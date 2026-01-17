@@ -18,6 +18,9 @@ VIDEO_DIR = os.path.join(DATA_DIR, 'videos')
 ALERT_DIR = os.path.join(DATA_DIR, 'alert_images')
 VERIFIED_DIR = os.path.join(DATA_DIR, 'verified_falls')      # [NEW] 실제 낙상 데이터
 FALSE_ALARM_DIR = os.path.join(DATA_DIR, 'false_alarms')    # [NEW] 오작동 데이터
+ARCHIVE_DIR = os.path.join(DATA_DIR, 'archive')             # [NEW] 학습 완료된 데이터 보관
+ARCHIVE_VERIFIED = os.path.join(ARCHIVE_DIR, 'verified_falls')
+ARCHIVE_FALSE = os.path.join(ARCHIVE_DIR, 'false_alarms')
 
 SETTINGS_PATH = os.path.join(DATA_DIR, 'settings.json')
 # 시스템 상태(심장박동)를 저장할 파일
@@ -42,6 +45,8 @@ def ensure_dirs():
     os.makedirs(ALERT_DIR, exist_ok=True)
     os.makedirs(VERIFIED_DIR, exist_ok=True)
     os.makedirs(FALSE_ALARM_DIR, exist_ok=True)
+    os.makedirs(ARCHIVE_VERIFIED, exist_ok=True)
+    os.makedirs(ARCHIVE_FALSE, exist_ok=True)
     os.makedirs(MODEL_DIR, exist_ok=True)
 
 def get_telegram_settings():
@@ -106,6 +111,19 @@ def send_telegram_alert(image_path, message, gif_path=None):
             return False
     except Exception as e:
         print(f"❌ 연결 오류: {e}")
+        return False
+
+def send_telegram_message(text):
+    """이미지 없이 텍스트 메시지만 전송합니다. (시스템 알림용)"""
+    token, chat_id = get_telegram_settings()
+    if not token or not chat_id: return False
+    
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {'chat_id': chat_id, 'text': text}
+        requests.post(url, data=data, timeout=5)
+        return True
+    except:
         return False
 
 def format_phone_number(number):

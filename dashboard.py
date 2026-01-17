@@ -60,9 +60,9 @@ default_token = settings.get("TELEGRAM_TOKEN", "")
 default_chat_id = settings.get("TELEGRAM_CHAT_ID", "")
 
 # ==========================================
-# [사이드바] 시스템 모니터링
+# [사이드바] 시스템 모니터링 (Moved to Authenticated Section)
 # ==========================================
-with st.sidebar:
+if False: # Previously 'with st.sidebar:'
     st.title("💻 시스템 리소스 모니터")
     
     if os.path.exists(utils.STATUS_PATH):
@@ -460,77 +460,50 @@ with st.sidebar:
     st.divider()
     
     st.subheader("🧠 AI 모델 재학습")
-    st.caption(f"백그라운드에서 학습이 진행됩니다. 설정을 변경해도 끊기지 않습니다.")
-
-    # Check Session State for Training Process
-    current_pid = st.session_state.get('train_pid')
-    is_training = False
+    st.info("이제 재학습은 데이터가 쌓이면 엔진이 '자동'으로 수행합니다.\n(하루 1회 / 데이터 30건 이상 시)")
     
-    if current_pid:
-        if is_process_running(current_pid):
-            is_training = True
-        else:
-            # Process finished
-            st.session_state['train_pid'] = None
-            is_training = False
-            # Check exit code or log for success? 
-            # Simplified: Just reset state.
-            st.success("학습 프로세스가 종료되었습니다.")
-
-    if is_training:
-        st.info(f"🔄 학습 진행 중... (PID: {current_pid})")
-        # Tail the log file
-        if os.path.exists(TRAIN_LOG_FILE):
-             with open(TRAIN_LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
-                 lines = f.readlines()
-                 last_lines = "".join(lines[-15:])
-                 st.code(last_lines, language="bash")
-        
-        if st.button("⏹️ 학습 강제 중단"):
-            try:
-                os.kill(current_pid, 9) # SIGKILL
-                st.session_state['train_pid'] = None
-                st.rerun()
-            except:
-                st.error("중단 실패")
-                
-        if st.button("🔄 로그 새로고침"):
-            st.rerun()
-            
+    st.divider()
+    
+    # [Restored Resource Monitor]
+    st.subheader("💻 시스템 리소스 모니터")
+    if os.path.exists(utils.STATUS_PATH):
+        try:
+             with open(utils.STATUS_PATH, 'r', encoding='utf-8') as f:
+                 status = json.load(f)
+                 perf = status.get("perf", {})
+                 fps = status.get("fps_real", 0)
+                 
+                 # Display FPS
+                 st.metric("실시간 FPS", f"{fps:.1f}", help="현재 시스템이 처리하는 초당 프레임 수입니다.")
+                 
+                 if perf:
+                     st.caption("작업별 리소스 점유율 (1프레임 당)")
+                     # Calculate total ms
+                     total_ms = sum(perf.values())
+                     if total_ms > 0:
+                         # AI Inference
+                         inf_ms = perf.get("AI Inference", 0)
+                         st.progress(min(1.0, inf_ms/total_ms), text=f"🤖 AI 분석 ({inf_ms}ms)")
+                         
+                         # Visual Overlay
+                         ovr_ms = perf.get("Visual Overlay", 0)
+                         st.progress(min(1.0, ovr_ms/total_ms), text=f"🎨 화면/아바타 ({ovr_ms}ms)")
+                         
+                         # Capture
+                         cap_ms = perf.get("Capture (IO)", 0)
+                         st.progress(min(1.0, cap_ms/total_ms), text=f"📷 카메라 입력 ({cap_ms}ms)")
+                         
+                         # Idle
+                         idle_ms = perf.get("Idle (Free)", 0)
+                         st.progress(min(1.0, idle_ms/total_ms), text=f"💤 유휴 자원 ({idle_ms}ms)")
+                     else:
+                         st.info("데이터 수집 중...")
+                 else:
+                     st.info("엔진 대기 중...")
+        except Exception as e:
+            st.error(f"모니터링 오류: {e}")
     else:
-        # Start Button
-        if st.button("🚀 모델 재학습 시작 (Background)", type="primary"):
-            if verified_count == 0 and false_count == 0:
-                st.error("학습할 데이터가 없습니다.")
-            else:
-                try:
-                    # Clear log file
-                    with open(TRAIN_LOG_FILE, "w", encoding="utf-8") as f:
-                        f.write("🚀 Starting Training Process...\n")
-                        
-                    script_path = os.path.join(utils.BASE_DIR, "train_stgcn.py")
-                    
-                    # Launch detached process redirecting output to file
-                    # Windows: We use minimal creation flags to let it run independentish
-                    # But stdout must be the file object
-                    
-                    log_f = open(TRAIN_LOG_FILE, "a", encoding="utf-8")
-                    
-                    proc = subprocess.Popen(
-                        [sys.executable, script_path],
-                        stdout=log_f,
-                        stderr=subprocess.STDOUT,
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                        # [Fix] close_fds=True removed to allow log file handle inheritance on Windows
-                    )
-                    
-                    st.session_state['train_pid'] = proc.pid
-                    st.success(f"백그라운드 학습 시작! (PID: {proc.pid})")
-                    time.sleep(1)
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"실행 실패: {e}")
+        st.warning("엔진이 실행되지 않았습니다.")
 
     st.divider()
     st.subheader("🔐 시스템 제어")

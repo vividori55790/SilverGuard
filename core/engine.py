@@ -6,6 +6,7 @@ import json
 import cv2
 import numpy as np
 import threading
+import subprocess # [New]
 from collections import deque
 
 # Parent import support
@@ -43,6 +44,11 @@ class SilverGuardEngine:
         
         # Cam 0 (Default)
         cap0 = cv2.VideoCapture(0)
+        # [Optimize] Set MJPG for faster USB transfer (Fixes 150ms delay)
+        cap0.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap0.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap0.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
         using_test = False
         if not cap0.isOpened():
             print("⚠️ 기본 카메라(0)를 찾을 수 없어 테스트 영상을 불러옵니다.")
@@ -81,6 +87,11 @@ class SilverGuardEngine:
 
         # Start background voice listener
         start_continuous_listening(self._on_voice_trigger)
+        
+        # [Auto Train State]
+        self.training_process = None
+        self.last_train_check = time.time()
+        self.last_reminder_check = time.time()
 
     def run(self):
         print(f"🟢 모니터링 시작! (카메라 {len(self.cams)}대 가동 중)")
@@ -176,6 +187,50 @@ class SilverGuardEngine:
                 # Sync offline data
                 if self.frame_count % 100 == 0:
                     sync_unsent_data()
+
+                # [Auto Train Check] (Daily Check)
+                # 기준: 하루(86400초) 지남 AND 데이터 30개 이상
+                current_time = time.time()
+                if current_time - self.last_train_check > 86400:
+                    self.last_train_check = current_time
+                    try:
+                        # Check if process is running
+                        is_running = (self.training_process is not None) and (self.training_process.poll() is None)
+                        
+                        if not is_running:
+                            v_files = [f for f in os.listdir(utils.VERIFIED_DIR) if f.endswith('.npy')]
+                            f_files = [f for f in os.listdir(utils.FALSE_ALARM_DIR) if f.endswith('.npy')]
+                            total_new_data = len(v_files) + len(f_files)
+                            
+                            AUTO_TRAIN_THRESHOLD = 30 # User requested 30
+                            
+                            if total_new_data >= AUTO_TRAIN_THRESHOLD:
+                                msg = f"🤖 [Auto-Train] 하루가 경과하여 신규 데이터 {total_new_data}건(기준 {AUTO_TRAIN_THRESHOLD})으로 재학습을 시작합니다."
+                                print(msg)
+                                utils.send_telegram_message(msg)
+                                
+                                script_path = os.path.join(utils.BASE_DIR, "train_stgcn.py")
+                                self.training_process = subprocess.Popen(
+                                    [sys.executable, script_path],
+                                    creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
+                                )
+                    except Exception as e:
+                        print(f"⚠️ Auto-Train Check Error: {e}")
+
+                # [Unclassified Reminder] (Hourly Check)
+                if current_time - self.last_reminder_check > 3600:
+                    self.last_reminder_check = current_time
+                    try:
+                        valid_exts = ('.jpg', '.png')
+                        unclassified = [f for f in os.listdir(utils.ALERT_DIR) if f.lower().endswith(valid_exts)]
+                        cnt = len(unclassified)
+                        
+                        REMINDER_THRESHOLD = 5 # 알림 기준 (미분류 5개 이상이면 독촉)
+                        if cnt >= REMINDER_THRESHOLD:
+                            msg = f"🔔 [대기 중] 미분류된 낙상 알림이 {cnt}건 있습니다.\n대시보드에서 '실제 낙상' 또는 '오작동'으로 분류해주세요."
+                            print(f"📨 분류 요청 알림 전송: {cnt}건")
+                            utils.send_telegram_message(msg)
+                    except: pass
 
                 # [SIMULATION TRIGGER CHECK]
                 sim_signal_path = os.path.join(utils.DATA_DIR, 'TRIGGER_FALL_SIM.signal')
