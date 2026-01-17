@@ -1,14 +1,7 @@
 {
-    "last_active": "2026-01-17 18:46:21",
+    "last_active": "2026-01-17 18:49:01",
     "active_cameras": 1,
     "camera_ids": [
         0
-    ],
-    "fps_real": 9.664011317631207,
-    "perf": {
-        "Capture (IO)": 25.6,
-        "AI Inference": 49.7,
-        "Visual Overlay": 0.7,
-        "Idle (Free)": 0.0
-    }
+    ]
 }

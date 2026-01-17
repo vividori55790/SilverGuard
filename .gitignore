@@ -19,5 +19,5 @@ SilverGuard/data/alert_images/*
 SilverGuard/data/videos/*
 
 # Models
-*.pt
-*.pth
+# *.pt
+# *.pth
