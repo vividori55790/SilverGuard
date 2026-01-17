@@ -92,16 +92,20 @@ def send_telegram_alert(image_path, message, gif_path=None):
         
         # 2. 영상 전송 (있을 경우)
         if gif_path and os.path.exists(gif_path):
+            file_size_mb = os.path.getsize(gif_path) / (1024 * 1024)
+            print(f"📤 텔레그램 영상 전송 시도... (파일: {gif_path}, 크기: {file_size_mb:.2f}MB)")
             url_video = f"https://api.telegram.org/bot{token}/sendVideo"
             with open(gif_path, 'rb') as video_file:
                 files_video = {'video': video_file}
-                data_video = {'chat_id': chat_id, 'caption': "🎥 사고 당시 상황 기록 (3초)"}
-                res_video = requests.post(url_video, files=files_video, data=data_video, timeout=60)
+                data_video = {'chat_id': chat_id, 'caption': "🎥 사고 당시 상황 기록 (약 5초)"}
+                res_video = requests.post(url_video, files=files_video, data=data_video, timeout=120)  # 큰 파일 위해 타임아웃 늘림
                 
                 if res_video.status_code == 200:
-                    print(f"🎬 동영상 전송 성공! ({gif_path})")
+                    print(f"🎬 동영상 텔레그램 전송 성공! ({gif_path})")
                 else:
                     print(f"❌ 동영상 전송 실패: {res_video.text}")
+        elif gif_path:
+            print(f"⚠️ 영상 파일이 존재하지 않아 전송하지 않음: {gif_path}")
                 
         if response.status_code == 200:
             print("🔔 텔레그램 알림 전송 성공!")

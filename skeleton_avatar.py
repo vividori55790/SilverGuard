@@ -627,5 +627,5 @@ def draw_virtual_avatar(frame, kpts_xy, confs):
     else:
         cv2.putText(canvas, "SEARCHING...", (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 100), 2)
 
-    cv2.putText(canvas, "SILVERGUARD AVATAR", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 200), 2)
+    cv2.putText(canvas, "SILVERGUARD AVATAR", (350, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 200), 2)
     return canvas

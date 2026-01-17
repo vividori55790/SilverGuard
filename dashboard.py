@@ -323,7 +323,7 @@ with tab2:
                         # 1. Image
                         try:
                             image = Image.open(img_path)
-                            st.image(image, caption=f"시간: {file_name[5:-4]}", use_container_width=True)
+                            st.image(image, caption=f"시간: {file_name[5:-4]}", width='stretch')
                         except: st.error("이미지 로드 실패")
                         
                         # 2. Checkbox for selection

@@ -1,3 +1,4 @@
+import subprocess
 import pyttsx3
 import speech_recognition as sr
 import numpy as np
@@ -114,27 +115,37 @@ _voice_lock = threading.Lock()
 # ... (set_max_volume and broadcast_tts_to_ipcamera remain same)
 
 def speak(text):
-    """AI가 음성으로 메시지 출력 (PC + 스마트폰 동시 송출) - Thread Safe"""
+    """AI가 음성으로 메시지 출력 (PC + 스마트폰 동시 송출) - Thread Safe (PowerShell)"""
     # Background TTS (Phone) doesn't use COM, so safe to call outside lock or inside.
-    # Let's call it first.
     print(f"📢 AI: {text}")
     try:
         broadcast_tts_to_ipcamera(text)
     except: pass
     
-    # Local PC TTS (Uses COM, needs Lock & CoInit)
-    with _voice_lock:
-        try:
-            pythoncom.CoInitialize() # 필수: 스레드에서 COM 사용 시 초기화
-            engine = pyttsx3.init()
-            engine.setProperty('rate', 160)
-            engine.say(text)
-            engine.runAndWait()
-            del engine 
-        except Exception as e:
-            print(f"⚠️ 음성 출력 오류: {e}")
-        finally:
-            pythoncom.CoUninitialize() # 필수: 해제
+    # Local PC TTS (Uses PowerShell for stability against COM/Thread hangs)
+    try:
+        # PowerShell command construction
+        # Escape single quotes for PowerShell string literal
+        safe_text = text.replace("'", "''").replace('"', '') 
+        
+        # System.Speech.Synthesis implementation
+        ps_command = (
+            f"Add-Type -AssemblyName System.Speech; "
+            f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$s.Rate = 0; "  # Normal speed
+            f"$s.Speak('{safe_text}')"
+        )
+        
+        # Execute with timeout to prevent system freeze
+        subprocess.run(
+            ["powershell", "-Command", ps_command], 
+            check=True, 
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        
+    except Exception as e:
+        print(f"⚠️ 음성 출력 오류 (PowerShell): {e}")
 
 def get_audio_rms(audio_data):
     """소리 크기 측정"""
@@ -188,14 +199,11 @@ def run_voice_emergency_check(image_path):
             print(f"👤 인식된 대답: {detail}")
             if any(word in detail for word in ["괜찮아", "어", "나 안 다쳤어", "아무렇지 않아", "문제 없어"]):
                 speak("확인되었습니다. 시스템을 정상 상태로 유지합니다.")
-                # [Auto Classification] User said Fine -> False Alarm
-                utils.move_alert_to_classified(image_path, utils.FALSE_ALARM_DIR)
+                # [Fix] 파일 이동은 텔레그램 전송 완료 후 engine.py에서 처리
                 result = "SAFE"
             elif any(word in detail for word in ["아니", "아파", "도와줘", "살려줘", "병원", "119", "구조"]):
                 speak("위급 상황임을 확인했습니다. 보호자에게 즉시 알림을 보냅니다.")
-                # [긴급] 즉시 텔레그램 전송
-                utils.send_telegram_alert(image_path, f"🚨 [긴급 구조 요청] 사용자가 육성으로 구조를 요청했습니다!\n🗣️ 인식된 말: \"{detail}\"")
-                utils.move_alert_to_classified(image_path, utils.VERIFIED_DIR)
+                # [Fix] 여기서 전송하지 않고 engine.py에서 통합 전송 (영상 포함)
                 result = "EMERGENCY"
             else:
                 speak("상황 확인이 정확하지 않아 일단 보호자에게 알림을 보냅니다.")
@@ -229,29 +237,47 @@ class BackgroundVoiceMonitor:
     def __init__(self, callback_func):
         self.callback = callback_func
         self.r = sr.Recognizer()
-        self.mic = sr.Microphone()
+        self.mic = None  # [Fix] 마이크 객체는 start() 시 생성
         self.is_running = False
         self.stopper = None
-        
-        # Adjust ambient noise initially
-        try:
-            with self.mic as source:
-                self.r.adjust_for_ambient_noise(source, duration=1)
-        except: pass
+        self._lock = threading.Lock()  # [Fix] 동시 접근 방지 락
 
     def start(self):
-        if self.is_running: return
-        print("👂 [Voice] 백그라운드 구조 요청 감지 시작...")
-        self.is_running = True
-        # listen_in_background creates a daemon thread
-        self.stopper = self.r.listen_in_background(self.mic, self._audio_handler, phrase_time_limit=3)
+        with self._lock:
+            if self.is_running: 
+                return
+            
+            print("👂 [Voice] 백그라운드 구조 요청 감지 시작...")
+            self.is_running = True
+            
+            try:
+                # [Fix] 매번 새로운 마이크 객체 생성하여 context manager 충돌 방지
+                self.mic = sr.Microphone()
+                # listen_in_background creates a daemon thread
+                self.stopper = self.r.listen_in_background(self.mic, self._audio_handler, phrase_time_limit=3)
+            except Exception as e:
+                print(f"⚠️ [Voice] 백그라운드 리스너 시작 실패: {e}")
+                self.is_running = False
+                self.mic = None
 
     def stop(self):
-        if self.stopper:
-            self.stopper(wait_for_stop=False)
-            self.stopper = None
-        self.is_running = False
-        print("🔇 [Voice] 백그라운드 감지 중지")
+        with self._lock:
+            if not self.is_running:
+                return
+                
+            print("🔇 [Voice] 백그라운드 감지 중지 중...")
+            self.is_running = False
+            
+            if self.stopper:
+                try:
+                    self.stopper(wait_for_stop=True)  # [Fix] wait_for_stop=True로 완전 종료 대기
+                except Exception as e:
+                    print(f"⚠️ [Voice] stopper 호출 오류: {e}")
+                self.stopper = None
+            
+            # [Fix] 마이크 객체 정리
+            self.mic = None
+            print("🔇 [Voice] 백그라운드 감지 중지 완료")
 
     def _audio_handler(self, recognizer, audio):
         if not self.is_running: return
@@ -273,21 +299,28 @@ class BackgroundVoiceMonitor:
         except sr.RequestError:
             pass
         except Exception as e:
-            print(f"⚠️ Voice Error: {e}")
+            # [Fix] AssertionError 무시 (이미 중지 중인 경우 발생 가능)
+            if "context manager" not in str(e):
+                print(f"⚠️ Voice Error: {e}")
 
 # Global instance
 _monitor = None
+_monitor_lock = threading.Lock()  # [Fix] 전역 인스턴스 접근용 락
 
 def start_continuous_listening(callback):
     global _monitor
-    if _monitor is None:
+    with _monitor_lock:
+        # [Fix] 기존 모니터 완전 정리 후 새로 생성 (callback 변경 지원)
+        if _monitor is not None:
+            _monitor.stop()
         _monitor = BackgroundVoiceMonitor(callback)
-    _monitor.start()
+        _monitor.start()
 
 def stop_continuous_listening():
     global _monitor
-    if _monitor:
-        _monitor.stop()
+    with _monitor_lock:
+        if _monitor:
+            _monitor.stop()
 
 if __name__ == "__main__":
     print("📢 voice_module 통합 테스트")

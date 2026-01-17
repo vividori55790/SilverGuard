@@ -9,6 +9,9 @@ import threading
 import subprocess # [New]
 from collections import deque
 
+# [Fix] FFmpeg MJPEG overread 경고 억제
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"  # AV_LOG_QUIET
+
 # Parent import support
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -29,12 +32,14 @@ class SilverGuardEngine:
         
         # Load Settings for Camera
         extra_cam_source = None
+        extra_cam_enabled = False  # [Fix] 토글 상태 확인
         if os.path.exists(utils.SETTINGS_PATH):
             try:
                 with open(utils.SETTINGS_PATH, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
+                    extra_cam_enabled = settings.get("EXTRA_CAM_ENABLED", False)  # [Fix] 토글 확인
                     val = settings.get("EXTRA_CAM", "")
-                    if val and str(val).strip() != "":
+                    if extra_cam_enabled and val and str(val).strip() != "":  # [Fix] 토글 활성화 시에만
                         # 숫자면 int형, 아니면 str형
                         extra_cam_source = int(val) if str(val).isdigit() else val
             except: pass
@@ -316,8 +321,33 @@ class SilverGuardEngine:
                         frames_to_show.append(display)
                         continue
 
-                    # Inference Skipping
-                    run_inference = (self.frame_count % 2 == 0)
+                    # [Optimize] 기본 추론 간격: 3프레임마다 (CPU 부하 감소)
+                    run_inference = (self.frame_count % 3 == 0)
+                    
+                    # [Optimize] 변화 감지 (단일/다중 카메라 모두 적용)
+                    if run_inference:
+                        if 'prev_frame_small' not in cam_data:
+                            cam_data['prev_frame_small'] = None
+                            cam_data['no_motion_count'] = 0
+                        
+                        # 축소 이미지로 빠르게 변화 감지
+                        frame_small = cv2.resize(frame, (160, 120))
+                        if cam_data['prev_frame_small'] is not None:
+                            diff = cv2.absdiff(
+                                cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY),
+                                cv2.cvtColor(cam_data['prev_frame_small'], cv2.COLOR_BGR2GRAY)
+                            )
+                            mean_diff = diff.mean()
+                            
+                            # 변화가 거의 없으면 추론 건너뛰기 (threshold: 3)
+                            if mean_diff < 3:
+                                cam_data['no_motion_count'] += 1
+                                # 단, 30프레임 이상 움직임 없으면 주기적으로 확인 (사람이 쓰러져 있을 수 있음)
+                                if cam_data['no_motion_count'] < 30:
+                                    run_inference = False
+                            else:
+                                cam_data['no_motion_count'] = 0
+                        cam_data['prev_frame_small'] = frame_small
                     
                     t_inf_s = time.perf_counter()
                     if run_inference:
@@ -481,21 +511,23 @@ class SilverGuardEngine:
 
                 if self.is_privacy_mode:
                     safe_img = skeleton_avatar.render_privacy_frame(frame.shape, kpts, confs)
-                    self._process_alert_async(safe_img, buffer_snapshot, timestamp)
+                    self._process_alert_async(safe_img, buffer_snapshot, timestamp, cam_data['id'])
                 else:
-                    self._process_alert_async(frame, buffer_snapshot, timestamp)
+                    self._process_alert_async(frame, buffer_snapshot, timestamp, cam_data['id'])
         else:
             cam_data['fall_state'] = False
 
-    def _process_alert_async(self, frame, buffer, timestamp):
+    def _process_alert_async(self, frame, buffer, timestamp, cam_id=0):
         """Run alert logic (save, voice, telegram) in a separate thread to prevent UI freeze"""
-        if not hasattr(self, 'is_processing_alert'): 
-            self.is_processing_alert = False
+        # [Fix] 카메라별 알림 처리 상태 분리
+        if not hasattr(self, 'processing_alert_cams'): 
+            self.processing_alert_cams = set()
             
-        if self.is_processing_alert:
+        if cam_id in self.processing_alert_cams:
+            print(f"⚠️ 카메라 {cam_id}의 알림 처리가 이미 진행 중입니다.")
             return
-            
-        self.is_processing_alert = True
+        
+        self.processing_alert_cams.add(cam_id)
         
         def worker():
             try:
@@ -503,7 +535,7 @@ class SilverGuardEngine:
             except Exception as e:
                 print(f"⚠️ Alert Worker Failed: {e}")
             finally:
-                self.is_processing_alert = False
+                self.processing_alert_cams.discard(cam_id)
                 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -540,28 +572,44 @@ class SilverGuardEngine:
                 h, w, _ = buffer[0].shape
                 if h <= 0 or w <= 0: raise Exception("Invalid frame dimensions")
 
-                # Try codecs in order: mp4v (Most compatible), XVID (Robust)
-                # Removed 'avc1' to avoid libopenh264 errors on some Windows setups
-                codecs_to_try = ['mp4v', 'XVID']
-                out = None
+                # [Fix] 텔레그램 호환 코덱: mp4v > XVID (avc1 제거 - libopenh264 에러 방지)
+                codecs_to_try = [
+                    ('mp4v', '.mp4'),  # MPEG-4 - 텔레그램 호환
+                    ('XVID', '.avi'),  # AVI 포맷 fallback
+                ]
                 
-                for codec in codecs_to_try:
+                success = False
+                for codec, ext in codecs_to_try:
                     try:
+                        # 확장자에 맞게 경로 수정
+                        if ext == '.avi':
+                            test_path = video_save_path.replace('.mp4', '.avi')
+                        else:
+                            test_path = video_save_path
+                            
                         fourcc = cv2.VideoWriter_fourcc(*codec)
-                        temp_out = cv2.VideoWriter(video_save_path, fourcc, 30.0, (w, h))
+                        temp_out = cv2.VideoWriter(test_path, fourcc, 30.0, (w, h))
                         
                         if temp_out.isOpened():
-                            # print(f"🎥 코덱 '{codec}'으로 영상 저장 시도...")
                             for f in buffer:
                                 temp_out.write(f)
                             temp_out.release()
-                            out = temp_out
-                            break # Success
-                    except: continue
+                            
+                            # 파일이 정상적으로 생성되었는지 확인
+                            if os.path.exists(test_path) and os.path.getsize(test_path) > 1000:
+                                video_save_path = test_path
+                                success = True
+                                print(f"🎥 코덱 '{codec}'으로 영상 저장 성공")
+                                break
+                        else:
+                            temp_out.release()
+                    except Exception as codec_err:
+                        print(f"⚠️ 코덱 '{codec}' 실패: {codec_err}")
+                        continue
 
-                if os.path.exists(video_save_path) and os.path.getsize(video_save_path) > 1000:
+                if success:
                     video_path = video_save_path
-                    print(f"🎥 낙상 영상 저장 완료")
+                    print(f"🎥 낙상 영상 저장 완료: {video_save_path}")
                 else:
                     print("⚠️ 영상 파일 생성 실패 (코덱 호환성 이슈 가능성)")
             except Exception as e:
@@ -589,6 +637,9 @@ class SilverGuardEngine:
                     # 온라인이면 바로 전송
                     utils.send_telegram_alert(save_path, alert_msg, video_path)
                     
+                    # [Fix] 텔레그램 전송 완료 후 파일 분류 (verified_falls로 이동)
+                    utils.move_alert_to_classified(save_path, utils.VERIFIED_DIR)
+                    
                     # [Auto Call - Windows Phone Link]
                     if self.auto_call_enabled and self.emergency_contact:
                         phone_nums = str(self.emergency_contact).split(',')
@@ -604,6 +655,8 @@ class SilverGuardEngine:
                     self.last_alert_time = time.time()
         else:
             print("✅ 사용자 확인 결과 '안전'하므로 알림을 전송하지 않습니다.")
+            # [Fix] SAFE인 경우 false_alarms로 분류
+            utils.move_alert_to_classified(save_path, utils.FALSE_ALARM_DIR)
 
     def _draw_overlay(self, frame, cam_data):
         detector = cam_data['detector']
@@ -775,8 +828,8 @@ class SilverGuardEngine:
             if is_rtsp:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
             elif is_http:
-                if "OPENCV_FFMPEG_CAPTURE_OPTIONS" in os.environ:
-                    del os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"]
+                # [Fix] HTTP MJPEG 스트림 버퍼 설정으로 overread 에러 감소
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "buffer_size;1024000"
             
             # Masking for log
             log_cand = cand_str
