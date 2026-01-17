@@ -13,7 +13,6 @@ __pycache__/
 Thumbs.db
 
 # Project Data (Private)
-SilverGuard/data/settings.json
 SilverGuard/data/status.json
 SilverGuard/data/alert_images/*
 SilverGuard/data/videos/*
