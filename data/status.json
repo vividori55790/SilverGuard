@@ -1,14 +1,15 @@
 {
-    "last_active": "2026-01-17 23:28:39",
-    "active_cameras": 1,
+    "last_active": "2026-01-18 01:02:10",
+    "active_cameras": 2,
     "camera_ids": [
-        0
+        0,
+        "http://admin:1234@192.168.0.212:8080/video"
     ],
-    "fps_real": 15.685930035148765,
+    "fps_real": 4.679932403004748,
     "perf": {
-        "Capture (IO)": 27.6,
-        "AI Inference": 15.3,
-        "Visual Overlay": 0.5,
+        "Capture (IO)": 73.6,
+        "AI Inference": 37.7,
+        "Visual Overlay": 0.7,
         "Idle (Free)": 0.0
     }
 }

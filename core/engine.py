@@ -65,7 +65,8 @@ class SilverGuardEngine:
             'source': 0 if not using_test else os.path.join(utils.VIDEO_DIR, utils.TEST_VIDEO_NAME),
             'cap': cap0,
             'detector': FallDetector(),
-            'buffer': deque(maxlen=150), # 버퍼 150프레임 (약 5초)
+            'buffer': deque(maxlen=150),     # 처리된 프레임 버퍼 (영상 저장용)
+            'raw_buffer': deque(maxlen=150), # [New] 원본 프레임 버퍼 (확인 패스용)
             'test_mode': using_test,
             'status': "Initializing",
             'color': (200, 200, 200),
@@ -310,6 +311,10 @@ class SilverGuardEngine:
                     if utils.CROP_RIGHT_HALF:
                         frame = frame[:, frame.shape[1]//2:]
 
+                    # [New] 원본 프레임을 raw_buffer에 저장 (YOLO 처리와 무관하게 균일한 프레임)
+                    if 'raw_buffer' in cam_data:
+                        cam_data['raw_buffer'].append(frame.copy())
+
                     # [Robustness] Warmup Period (Ignore first N frames after connection)
                     if cam_data.get('warmup', 0) > 0:
                         cam_data['warmup'] -= 1
@@ -505,6 +510,17 @@ class SilverGuardEngine:
                 except Exception as e:
                     print(f"⚠️ 학습 데이터 저장 실패: {e}")
 
+                # [Robustness] Verification Pass - 원본 프레임을 균일하게 재처리하여 확인
+                # raw_buf = cam_data.get('raw_buffer', cam_data['buffer'])
+                # verified = self._verify_fall_detection(raw_buf, cam_data['detector'])
+                # 
+                # if not verified:
+                #     print(f"⚠️ 확인 패스 실패: 환경 노이즈로 인한 오탐으로 판단, 알림 취소")
+                #     cam_data['fall_state'] = False
+                #     return
+                # 
+                # print(f"✅ 확인 패스 통과: 낙상 확정!")
+
                 # [Fix] Create Snapshot of buffer for Thread Safety
                 # 메인 스레드가 계속 업데이트하는 버퍼를 스레드에서 읽으면 충돌/에러 발생 가능
                 buffer_snapshot = list(cam_data['buffer'])
@@ -516,6 +532,56 @@ class SilverGuardEngine:
                     self._process_alert_async(frame, buffer_snapshot, timestamp, cam_data['id'])
         else:
             cam_data['fall_state'] = False
+    
+    def _verify_fall_detection(self, frame_buffer, detector):
+        """
+        [Verification Pass] 버퍼의 프레임들을 균일하게 샘플링하여 ST-GCN으로 재검증.
+        불안정한 프레임레이트 환경에서도 견고하게 동작.
+        """
+        try:
+            buffer_list = list(frame_buffer)
+            if len(buffer_list) < 60:  # 최소 60프레임(약 2초) 필요
+                print("   ⚠️ 확인용 버퍼 부족, 바로 통과")
+                return True
+            
+            # 마진을 주어 마지막 90프레임 사용 (약 3초)
+            margin_frames = buffer_list[-90:] if len(buffer_list) >= 90 else buffer_list
+            
+            # 균일하게 30프레임 샘플링 (30FPS로 정규화)
+            total = len(margin_frames)
+            indices = np.linspace(0, total - 1, 30, dtype=int)
+            sampled_frames = [margin_frames[i] for i in indices]
+            
+            # 기존 detector의 버퍼만 리셋하여 재사용 (모델 재로딩 방지)
+            detector.reset_buffer()
+            fall_count = 0
+            total_inferences = 0
+            
+            print(f"   🔍 확인 패스 시작: {len(sampled_frames)}프레임 재분석...")
+            
+            for frame in sampled_frames:
+                try:
+                    pred_cls, conf, _, _, _, detected, _ = detector.process(frame, timestamp=None)
+                    if detected:
+                        total_inferences += 1
+                        if pred_cls == 1 and conf > 0.6:
+                            fall_count += 1
+                except:
+                    continue
+            
+            # 최소 50% 이상의 프레임에서 낙상 감지되면 확정
+            if total_inferences > 0:
+                fall_ratio = fall_count / total_inferences
+                print(f"   🔍 확인 패스: {fall_count}/{total_inferences} 프레임에서 낙상 감지 ({fall_ratio*100:.1f}%)")
+                return fall_ratio >= 0.5
+            else:
+                # 키포인트 추출 실패 시 원래 판정 유지
+                print("   ⚠️ 키포인트 추출 실패, 원래 판정 유지")
+                return True
+                
+        except Exception as e:
+            print(f"   ⚠️ 확인 패스 에러: {e}, 원래 판정 유지")
+            return True
 
     def _process_alert_async(self, frame, buffer, timestamp, cam_id=0):
         """Run alert logic (save, voice, telegram) in a separate thread to prevent UI freeze"""
@@ -572,10 +638,13 @@ class SilverGuardEngine:
                 h, w, _ = buffer[0].shape
                 if h <= 0 or w <= 0: raise Exception("Invalid frame dimensions")
 
-                # [Fix] 텔레그램 호환 코덱: mp4v > XVID (avc1 제거 - libopenh264 에러 방지)
+                # [Fix] 텔레그램 호환 코덱 순서: avc1 > mp4v > XVID
+                # avc1(H.264)이 모바일 등에서 가장 호환성이 좋음.
+                # Windows에서 'libopenh264' 에러가 나더라도 VideoWriter가 열리지 않으면 다음으로 넘어감.
                 codecs_to_try = [
-                    ('mp4v', '.mp4'),  # MPEG-4 - 텔레그램 호환
-                    ('XVID', '.avi'),  # AVI 포맷 fallback
+                    ('avc1', '.mp4'),  # H.264 (Best)
+                    ('mp4v', '.mp4'),  # MPEG-4 (Good)
+                    ('XVID', '.avi'),  # XVID (Fallback)
                 ]
                 
                 success = False
@@ -881,7 +950,8 @@ class SilverGuardEngine:
                 'source': resolved_src,
                 'cap': cap,
                 'detector': FallDetector(),
-                'buffer': deque(maxlen=150), 
+                'buffer': deque(maxlen=150),
+                'raw_buffer': deque(maxlen=150),  # [New] 원본 프레임 버퍼
                 'test_mode': False,
                 'status': "Stabilizing...",
                 'color': (200, 200, 200),

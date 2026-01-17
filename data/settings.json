@@ -9,9 +9,9 @@
     "CAM_PASS": "1234",
     "USER_REGION_1": "경기도",
     "USER_REGION_2": "수원시",
-    "AI_CONFIDENCE": 0.9,
-    "AI_STRICTNESS": "High",
+    "AI_CONFIDENCE": 0.4,
+    "AI_STRICTNESS": "Low",
     "AUTO_CALL_ENABLED": true,
-    "TARGET_FPS": 26,
-    "DASHBOARD_PW": "silver1234"
+    "TARGET_FPS": 30,
+    "DASHBOARD_PW": "password"
 }
