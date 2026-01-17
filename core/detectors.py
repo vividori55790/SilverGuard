@@ -24,7 +24,7 @@ class FallDetector:
 
         # Constants
         self.SEQUENCE_LENGTH = 30
-        self.YOLO_IMG_SIZE = 640
+        self.YOLO_IMG_SIZE = 480 # Optimized from 640 (Speed up)
         
         # Load models
         self.yolo_model = YOLO(utils.YOLO_MODEL_PATH)

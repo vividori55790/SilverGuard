@@ -71,7 +71,66 @@ def load_data():
             data_list.append(window_data)
             label_list.append(final_label)
             
+            data_list.append(window_data)
+            label_list.append(final_label)
+            
+    # [NEW] Load Field Data (Self-Learning)
+    field_X, field_y = load_field_data()
+    if len(field_X) > 0:
+        print(f"🌟 Found {len(field_X)} new field data samples from actual operation!")
+        # Concatenate
+        if len(data_list) > 0:
+            data_list = np.concatenate((data_list, field_X), axis=0)
+            label_list = np.concatenate((label_list, field_y), axis=0)
+        else:
+            data_list = field_X
+            label_list = field_y
+            
     return np.array(data_list), np.array(label_list)
+
+def load_field_data():
+    """
+    Search for .npy files in VERIFIED_DIR (Label=1) and FALSE_ALARM_DIR (Label=0).
+    Allows the model to learn from user feedback.
+    """
+    new_data = []
+    new_labels = []
+    
+    # 1. Verified Falls (Label 1)
+    if os.path.exists(utils.VERIFIED_DIR):
+        npy_files = [f for f in os.listdir(utils.VERIFIED_DIR) if f.endswith('.npy')]
+        for f in npy_files:
+            try:
+                path = os.path.join(utils.VERIFIED_DIR, f)
+                seq = np.load(path)
+                if seq.ndim == 3 and seq.shape[1] == 17 and seq.shape[2] == 3:
+                     num_frames = len(seq)
+                     if num_frames >= WINDOW_SIZE:
+                         for start in range(0, num_frames - WINDOW_SIZE + 1, STRIDE):
+                             end = start + WINDOW_SIZE
+                             window = seq[start:end]
+                             new_data.append(window)
+                             new_labels.append(1) 
+            except Exception as e: print(f"⚠️ Error loading verified {f}: {e}")
+
+    # 2. False Alarms (Label 0) - CRITICAL for reducing false positives
+    if os.path.exists(utils.FALSE_ALARM_DIR):
+        npy_files = [f for f in os.listdir(utils.FALSE_ALARM_DIR) if f.endswith('.npy')]
+        for f in npy_files:
+            try:
+                path = os.path.join(utils.FALSE_ALARM_DIR, f)
+                seq = np.load(path)
+                if seq.ndim == 3 and seq.shape[1] == 17 and seq.shape[2] == 3:
+                     num_frames = len(seq)
+                     if num_frames >= WINDOW_SIZE:
+                         for start in range(0, num_frames - WINDOW_SIZE + 1, STRIDE):
+                             end = start + WINDOW_SIZE
+                             window = seq[start:end]
+                             new_data.append(window)
+                             new_labels.append(0) # Label as Normal
+            except Exception as e: print(f"⚠️ Error loading false alarm {f}: {e}")
+            
+    return np.array(new_data), np.array(new_labels)
 
 class FallDataset(Dataset):
     def __init__(self, data, labels):

@@ -5,8 +5,13 @@ import time
 import utils
 import ctypes
 import pythoncom
+import requests
+import json
+import os
+from urllib.parse import quote
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 from comtypes import CLSCTX_ALL
+from threading import Thread
 
 # 윈도우 키 입력을 위한 설정 (볼륨 강제 조절용)
 VK_VOLUME_UP = 0xAF
@@ -38,17 +43,79 @@ def set_max_volume():
     except Exception as e:
         print(f"❌ 모든 볼륨 조절 실패: {e}")
 
+def broadcast_tts_to_ipcamera(text):
+    """
+    연결된 IP 카메라(Android IP Webcam 앱 등)에 TTS 명령을 전송하여
+    스마트폰 스피커에서도 동시에 소리가 나게 합니다.
+    """
+    try:
+        if not os.path.exists(utils.SETTINGS_PATH): return
+        
+        with open(utils.SETTINGS_PATH, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+            
+        raw_val = str(settings.get("EXTRA_CAM", ""))
+        user = str(settings.get("CAM_USER", "")).strip()
+        pwd = str(settings.get("CAM_PASS", "")).strip()
+        
+        if not raw_val: return
+        
+        targets = [p.strip() for p in raw_val.split(',')]
+        
+        def send_tts_worker(url_base, user, pwd, msg):
+            # IP Webcam Android App API: http://IP:8080/tts?text=...
+            # Construct Base URL (Remove /video or similar paths)
+            try:
+                # Handle full URL input
+                if "://" in url_base:
+                    # http://192.168.1.5:8080/video -> http://192.168.1.5:8080
+                    import urllib.parse
+                    parsed = urllib.parse.urlparse(url_base)
+                    scheme = parsed.scheme
+                    netloc = parsed.netloc # includes port
+                    base = f"{scheme}://{netloc}"
+                else:
+                    # Just IP? Assume HTTP 8080
+                    base = f"http://{url_base}"
+                    if ":" not in url_base: base += ":8080"
+                
+                # Setup Auth
+                auth = None
+                if user and pwd:
+                    auth = (user, pwd)
+                elif "@" in base:
+                    # Extract auth from URL if present
+                    # requests handles basic auth if passed manually, but requests.get(url_with_auth) works too usually.
+                    pass 
+                
+                tts_url = f"{base}/tts?text={quote(msg)}"
+                # print(f"📡 Sending TTS to Camera: {base}")
+                
+                requests.get(tts_url, auth=auth, timeout=3)
+            except: 
+                pass
+
+        for t in targets:
+            # Sync call might block voice, so use simple thread
+            Thread(target=send_tts_worker, args=(t, user, pwd, text)).start()
+            
+    except Exception as e:
+        print(f"⚠️ IP Camera TTS Fail: {e}")
+
 def speak(text):
-    """AI가 음성으로 메시지 출력"""
+    """AI가 음성으로 메시지 출력 (PC + 스마트폰 동시 송출)"""
     print(f"📢 AI: {text}")
+    
+    # 1. Broadcast to Phones (Background)
+    broadcast_tts_to_ipcamera(text)
+    
+    # 2. Local PC TTS
     try:
         # 매번 엔진을 초기화하여 충돌 방지
         engine = pyttsx3.init()
         engine.setProperty('rate', 160)
         engine.say(text)
         engine.runAndWait()
-        # engine.stop()을 호출하면 다음 호출 시 에러가 날 수 있어 명시적으로 닫지 않거나
-        # del engine을 사용합니다.
         del engine 
     except Exception as e:
         print(f"⚠️ 음성 출력 오류: {e}")
@@ -117,6 +184,83 @@ def run_voice_emergency_check(image_path):
         speak("응답이 전혀 없어 비상 상황으로 간주하고 구조 요청을 전송합니다.")
         return "NO_RESPONSE_EMERGENCY"
 
+# ... (Existing code) ...
+
+# Global stopper for background listening
+_background_stopper = None
+_background_recognizer = None
+
+class BackgroundVoiceMonitor:
+    def __init__(self, callback_func):
+        self.callback = callback_func
+        self.r = sr.Recognizer()
+        self.mic = sr.Microphone()
+        self.is_running = False
+        self.stopper = None
+        
+        # Adjust ambient noise initially
+        try:
+            with self.mic as source:
+                self.r.adjust_for_ambient_noise(source, duration=1)
+        except: pass
+
+    def start(self):
+        if self.is_running: return
+        print("👂 [Voice] 백그라운드 구조 요청 감지 시작...")
+        self.is_running = True
+        # listen_in_background creates a daemon thread
+        self.stopper = self.r.listen_in_background(self.mic, self._audio_handler, phrase_time_limit=3)
+
+    def stop(self):
+        if self.stopper:
+            self.stopper(wait_for_stop=False)
+            self.stopper = None
+        self.is_running = False
+        print("🔇 [Voice] 백그라운드 감지 중지")
+
+    def _audio_handler(self, recognizer, audio):
+        if not self.is_running: return
+        try:
+            # Recognize text (online)
+            # Short timeout to avoid blocking thread too long
+            text = recognizer.recognize_google(audio, language='ko-KR')
+            print(f"👂 [Voice Heard]: {text}")
+            
+            # Keywords
+            triggers = ["도와줘", "살려줘", "119", "신고해", "구조", "아파", "긴급"]
+            if any(k in text for k in triggers):
+                print(f"🚨 [Voice Alert] 구조 요청 키워드 감지!: {text}")
+                if self.callback:
+                    self.callback(text)
+                    
+        except sr.UnknownValueError:
+            pass
+        except sr.RequestError:
+            pass
+        except Exception as e:
+            print(f"⚠️ Voice Error: {e}")
+
+# Global instance
+_monitor = None
+
+def start_continuous_listening(callback):
+    global _monitor
+    if _monitor is None:
+        _monitor = BackgroundVoiceMonitor(callback)
+    _monitor.start()
+
+def stop_continuous_listening():
+    global _monitor
+    if _monitor:
+        _monitor.stop()
+
 if __name__ == "__main__":
-    print("📢 voice_module 통합 테스트(강제 볼륨업 포함)를 시작합니다.")
-    run_voice_emergency_check("test.jpg")
+    print("📢 voice_module 통합 테스트")
+    # run_voice_emergency_check("test.jpg")
+    
+    def test_cb(text):
+        print(f"Callback Triggered: {text}")
+        
+    start_continuous_listening(test_cb)
+    while True:
+        time.sleep(1)

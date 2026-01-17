@@ -14,6 +14,9 @@ MODEL_DIR = os.path.join(BASE_DIR, 'models')
 
 VIDEO_DIR = os.path.join(DATA_DIR, 'videos')
 ALERT_DIR = os.path.join(DATA_DIR, 'alert_images')
+VERIFIED_DIR = os.path.join(DATA_DIR, 'verified_falls')      # [NEW] 실제 낙상 데이터
+FALSE_ALARM_DIR = os.path.join(DATA_DIR, 'false_alarms')    # [NEW] 오작동 데이터
+
 SETTINGS_PATH = os.path.join(DATA_DIR, 'settings.json')
 # 시스템 상태(심장박동)를 저장할 파일
 STATUS_PATH = os.path.join(DATA_DIR, 'status.json') 
@@ -35,6 +38,8 @@ MOTION_THRESHOLD = 3000
 def ensure_dirs():
     """필요한 폴더가 없으면 생성"""
     os.makedirs(ALERT_DIR, exist_ok=True)
+    os.makedirs(VERIFIED_DIR, exist_ok=True)
+    os.makedirs(FALSE_ALARM_DIR, exist_ok=True)
     os.makedirs(MODEL_DIR, exist_ok=True)
 
 def get_telegram_settings():
@@ -175,12 +180,15 @@ def find_nearby_hospitals(region1, region2):
         return []
 
 # [추가됨] 시스템 상태 관리 함수들
-def update_heartbeat():
-    """main.py가 실행 중임을 알리는 심장박동 시간을 기록합니다."""
+def update_heartbeat(extra_data=None):
+    """main.py가 실행 중임을 알리는 심장박동 시간을 기록합니다. 추가 정보도 함께 저장합니다."""
     try:
         data = {"last_active": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if extra_data:
+            data.update(extra_data)
+            
         with open(STATUS_PATH, 'w', encoding='utf-8') as f:
-            json.dump(data, f)
+            json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception:
         pass
 
@@ -200,3 +208,20 @@ def is_system_running():
     except Exception:
         pass
     return False
+
+def make_phone_call(phone_number):
+    """
+    Windows의 'tel:' 프로토콜을 사용하여 기본 전화 앱(휴대폰과 연결)을 실행합니다.
+    """
+    try:
+        # 전화번호 정제 (숫자만 남기기)
+        clean_number = "".join(filter(str.isdigit, str(phone_number)))
+        
+        # Windows 명령어 실행 ("tel:01012345678")
+        # 이것은 Windows의 'URL:Tel Protocol'을 트리거하여 '휴대폰과 연결' 앱을 엽니다.
+        os.startfile(f"tel:{clean_number}")
+        print(f"📞 PC에서 전화 발신 요청: {phone_number}")
+        return True
+    except Exception as e:
+        print(f"❌ 전화 발신 실패: {e}")
+        return False
