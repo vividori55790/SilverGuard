@@ -55,10 +55,12 @@ def broadcast_tts_to_ipcamera(text):
             settings = json.load(f)
             
         raw_val = str(settings.get("EXTRA_CAM", ""))
+        extra_enabled = settings.get("EXTRA_CAM_ENABLED", True) # [NEW] Check flag
+        
         user = str(settings.get("CAM_USER", "")).strip()
         pwd = str(settings.get("CAM_PASS", "")).strip()
         
-        if not raw_val: return
+        if not raw_val or not extra_enabled: return
         
         targets = [p.strip() for p in raw_val.split(',')]
         
@@ -102,23 +104,37 @@ def broadcast_tts_to_ipcamera(text):
     except Exception as e:
         print(f"⚠️ IP Camera TTS Fail: {e}")
 
+# ... imports assumed present
+import threading
+import pythoncom
+
+# Global lock for TTS to prevent thread collision
+_voice_lock = threading.Lock()
+
+# ... (set_max_volume and broadcast_tts_to_ipcamera remain same)
+
 def speak(text):
-    """AI가 음성으로 메시지 출력 (PC + 스마트폰 동시 송출)"""
+    """AI가 음성으로 메시지 출력 (PC + 스마트폰 동시 송출) - Thread Safe"""
+    # Background TTS (Phone) doesn't use COM, so safe to call outside lock or inside.
+    # Let's call it first.
     print(f"📢 AI: {text}")
-    
-    # 1. Broadcast to Phones (Background)
-    broadcast_tts_to_ipcamera(text)
-    
-    # 2. Local PC TTS
     try:
-        # 매번 엔진을 초기화하여 충돌 방지
-        engine = pyttsx3.init()
-        engine.setProperty('rate', 160)
-        engine.say(text)
-        engine.runAndWait()
-        del engine 
-    except Exception as e:
-        print(f"⚠️ 음성 출력 오류: {e}")
+        broadcast_tts_to_ipcamera(text)
+    except: pass
+    
+    # Local PC TTS (Uses COM, needs Lock & CoInit)
+    with _voice_lock:
+        try:
+            pythoncom.CoInitialize() # 필수: 스레드에서 COM 사용 시 초기화
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 160)
+            engine.say(text)
+            engine.runAndWait()
+            del engine 
+        except Exception as e:
+            print(f"⚠️ 음성 출력 오류: {e}")
+        finally:
+            pythoncom.CoUninitialize() # 필수: 해제
 
 def get_audio_rms(audio_data):
     """소리 크기 측정"""
@@ -148,41 +164,60 @@ def listen_and_analyze(timeout=10):
 def run_voice_emergency_check(image_path):
     """낙상 발생 시 실행되는 메인 로직"""
     
-    # 1차 시도 (일반 볼륨)
-    speak("낙상이 감지되었습니다. 괜찮으십니까? 대답이 없으시면 구조 요청을 보냅니다.")
-    status, detail = listen_and_analyze(timeout=10)
+    # [Fix] 충돌 방지를 위해 백그라운드 청취 일시 중지
+    # 마이크 자원 독점을 방지해야 함
+    stop_continuous_listening()
+    time.sleep(0.5) # 스레드 정리 대기
     
-    # 2차 시도 (무응답 시 볼륨업 후 재질문)
-    if status == "SILENCE":
-        print("❓ 응답 없음: 볼륨을 최대치로 높입니다.")
-        set_max_volume()
-        time.sleep(1) 
-        speak("잘 안 들리실 수 있어 다시 크게 여쭤보겠습니다. 괜찮으신가요? 응답이 없으시면 비상 상황으로 간주합니다.")
+    try:
+        # 1차 시도 (일반 볼륨)
+        speak("낙상이 감지되었습니다. 괜찮으십니까? 대답이 없으시면 구조 요청을 보냅니다.")
         status, detail = listen_and_analyze(timeout=10)
-
-    # 최종 결과 판단
-    if status == "VOICE":
-        print(f"👤 인식된 대답: {detail}")
-        if any(word in detail for word in ["괜찮아", "어", "나 안 다쳤어", "아무렇지 않아", "문제 없어"]):
-            speak("확인되었습니다. 시스템을 정상 상태로 유지합니다.")
-            return "SAFE"
-        elif any(word in detail for word in ["아니", "아파", "도와줘", "살려줘", "병원", "119", "구조"]):
-            speak("위급 상황임을 확인했습니다. 보호자에게 즉시 알림을 보냅니다.")
-            # [긴급] 즉시 텔레그램 전송 (메인 로직과 별개로 여기서 바로 전송)
-            utils.send_telegram_alert(image_path, f"🚨 [긴급 구조 요청] 사용자가 육성으로 구조를 요청했습니다!\n🗣️ 인식된 말: \"{detail}\"")
-            return "EMERGENCY"
-        else:
-            speak("상황 확인이 정확하지 않아 일단 보호자에게 알림을 보냅니다.")
-            return "CHECK_NEEDED"
-            
-    elif status == "SOUND_DETECTED":
-        speak("이상 소음이 감지되어 즉시 보호자에게 알립니다.")
-        return "CRITICAL_SOUND"
         
-    else:
-        print("🚨 최종 무응답: 비상 상황 확정")
-        speak("응답이 전혀 없어 비상 상황으로 간주하고 구조 요청을 전송합니다.")
-        return "NO_RESPONSE_EMERGENCY"
+        # 2차 시도 (무응답 시 볼륨업 후 재질문)
+        if status == "SILENCE":
+            print("❓ 응답 없음: 볼륨을 최대치로 높입니다.")
+            set_max_volume()
+            time.sleep(1) 
+            speak("잘 안 들리실 수 있어 다시 크게 여쭤보겠습니다. 괜찮으신가요? 응답이 없으시면 비상 상황으로 간주합니다.")
+            status, detail = listen_and_analyze(timeout=10)
+
+        # 최종 결과 판단
+        result = "CHECK_NEEDED"
+        if status == "VOICE":
+            print(f"👤 인식된 대답: {detail}")
+            if any(word in detail for word in ["괜찮아", "어", "나 안 다쳤어", "아무렇지 않아", "문제 없어"]):
+                speak("확인되었습니다. 시스템을 정상 상태로 유지합니다.")
+                # [Auto Classification] User said Fine -> False Alarm
+                utils.move_alert_to_classified(image_path, utils.FALSE_ALARM_DIR)
+                result = "SAFE"
+            elif any(word in detail for word in ["아니", "아파", "도와줘", "살려줘", "병원", "119", "구조"]):
+                speak("위급 상황임을 확인했습니다. 보호자에게 즉시 알림을 보냅니다.")
+                # [긴급] 즉시 텔레그램 전송
+                utils.send_telegram_alert(image_path, f"🚨 [긴급 구조 요청] 사용자가 육성으로 구조를 요청했습니다!\n🗣️ 인식된 말: \"{detail}\"")
+                utils.move_alert_to_classified(image_path, utils.VERIFIED_DIR)
+                result = "EMERGENCY"
+            else:
+                speak("상황 확인이 정확하지 않아 일단 보호자에게 알림을 보냅니다.")
+                result = "CHECK_NEEDED"
+                
+        elif status == "SOUND_DETECTED":
+            speak("이상 소음이 감지되어 즉시 보호자에게 알립니다.")
+            result = "CRITICAL_SOUND"
+            
+        else:
+            print("🚨 최종 무응답: 비상 상황 확정")
+            speak("응답이 전혀 없어 비상 상황으로 간주하고 구조 요청을 전송합니다.")
+            result = "NO_RESPONSE_EMERGENCY"
+            
+        return result
+
+    except Exception as e:
+        print(f"⚠️ Voice Check Failed: {e}")
+        return "CHECK_NEEDED"
+    finally:
+        # [Fix] 작업 완료 후 백그라운드 감시 재개
+        start_continuous_listening(None)
 
 # ... (Existing code) ...
 

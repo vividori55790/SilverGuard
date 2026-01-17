@@ -86,13 +86,48 @@ class SilverGuardEngine:
         print(f"🟢 모니터링 시작! (카메라 {len(self.cams)}대 가동 중)")
         sync_unsent_data()
         
+        # [Performance] Stats & Config
+        self.perf_stats = {"capture": 0.0, "inference": 0.0, "overlay": 0.0, "settings": 0.0, "idle": 0.0}
+        self.target_fps = 30 # Can be updated from settings
+        
         try:
             while True:
+                loop_start = time.perf_counter() # Start Timer
+                
                 self.frame_count += 1
                 
-                # Check Settings periodically (약 1초마다)
+                # [Perf] Measure Settings Check
+                t_set_start = time.perf_counter()
+                
+                # Check Settings & Model periodically (약 1초마다)
                 if self.frame_count % 30 == 0:
                     self.is_privacy_mode = skeleton_avatar.check_privacy_mode()
+                    # ... (rest of logic continues)
+                    
+                    # [NEW] Auto-Reload AI Model if updated
+                    try:
+                        model_path = os.path.join(utils.MODEL_DIR, 'stgcn_fall.pth')
+                        if os.path.exists(model_path):
+                            mtime = os.path.getmtime(model_path)
+                            # Initialize last_model_time if not set
+                            if not hasattr(self, 'last_model_time'): self.last_model_time = mtime
+                            
+                            if mtime > self.last_model_time:
+                                print(f"🧠 AI 모델 업데이트 감지! ({mtime}) -> 엔진에 즉시 반영합니다.")
+                                self.last_model_time = mtime
+                                # Reload detectors
+                                from core.detection import FallDetector # Ensure import
+                                for cam in self.cams:
+                                    # Create new detector to load new weights
+                                    # Preserve sensitivity settings
+                                    old_conf = cam['detector'].confidence_threshold
+                                    old_strict = cam['detector'].strictness
+                                    cam['detector'] = FallDetector(is_file=False) # Source doesn't matter for init logic mostly
+                                    cam['detector'].set_sensitivity(old_conf, old_strict)
+                                print("✅ 모든 카메라의 AI 모델 리로드 완료.")
+                    except Exception as e:
+                        print(f"⚠️ 모델 리로드 실패: {e}")
+
                     try:
                         with open(utils.SETTINGS_PATH, 'r', encoding='utf-8') as f:
                             settings = json.load(f)
@@ -105,14 +140,16 @@ class SilverGuardEngine:
                                     settings.get("AI_CONFIDENCE", 0.65), settings.get("AI_STRICTNESS", "Medium")
                                 )
                             # Camera Config Logic
-                            # Camera Config Logic
                             raw_val = str(settings.get("EXTRA_CAM", ""))
+                            extra_cam_enabled = settings.get("EXTRA_CAM_ENABLED", True) # [NEW] Check enabled
+                            
                             cam_user = str(settings.get("CAM_USER", "")).strip()
                             cam_pass = str(settings.get("CAM_PASS", "")).strip()
                             current_creds = (cam_user, cam_pass)
 
                             new_sources = []
-                            if raw_val.strip():
+                            # Only add sources if enabled and string exists
+                            if extra_cam_enabled and raw_val.strip():
                                 parts = [p.strip() for p in raw_val.split(',')]
                                 for p in parts:
                                     if p: new_sources.append(int(p) if p.isdigit() else p)
@@ -121,7 +158,7 @@ class SilverGuardEngine:
                             if not hasattr(self, 'last_raw_sources'):
                                 self.last_raw_sources = []
                                 self.last_creds = ("", "") 
-
+                            
                             # Check if Sources OR Credentials changed directly
                             if new_sources != self.last_raw_sources or current_creds != self.last_creds:
                                 print(f"🔄 카메라 설정/계정 변경 감지: {self.last_raw_sources} -> {new_sources}")
@@ -227,6 +264,7 @@ class SilverGuardEngine:
                     # Inference Skipping
                     run_inference = (self.frame_count % 2 == 0)
                     
+                    t_inf_s = time.perf_counter()
                     if run_inference:
                         try:
                             pred_cls, conf, _, _, _, _, reason = cam_data['detector'].process(frame, timestamp=time.time())
@@ -236,8 +274,15 @@ class SilverGuardEngine:
                             self._handle_detection(cam_data, pred_cls, conf, frame, kpts, confs, bbox, reason)
                         except Exception as e:
                             print(f"⚠️ Inference Error: {e}")
+                    
+                    # Update Inference Stats (EMA)
+                    self.perf_stats['inference'] = self.perf_stats['inference'] * 0.9 + (time.perf_counter() - t_inf_s) * 0.1
 
+                    t_ovr_s = time.perf_counter()
                     display = self._draw_overlay(frame, cam_data)
+                    # Update Overlay Stats (EMA)
+                    self.perf_stats['overlay'] = self.perf_stats['overlay'] * 0.9 + (time.perf_counter() - t_ovr_s) * 0.1
+
                     cam_data['buffer'].append(display.copy())
                     frames_to_show.append(display)
 
@@ -252,7 +297,41 @@ class SilverGuardEngine:
                 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-                    
+
+                # [FPS Control & Stats Reporting]
+                loop_dt = time.perf_counter() - loop_start
+                target_dt = 1.0 / self.target_fps
+                sleep_t = target_dt - loop_dt
+                
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+                    self.perf_stats['idle'] = self.perf_stats['idle'] * 0.9 + sleep_t * 0.1
+                    loop_dt += sleep_t # Total time includes sleep
+                else:
+                     self.perf_stats['idle'] = 0.0
+                
+                # Capture time estimation (Total - (Inf + Overlay + Settings + Idle))
+                # Note: 'Settings' is small/occasional. Capture includes Overhead.
+                non_capture_time = self.perf_stats['inference'] + self.perf_stats['overlay'] + self.perf_stats['idle']
+                est_capture = max(0.0, loop_dt - non_capture_time)
+                self.perf_stats['capture'] = self.perf_stats['capture'] * 0.9 + est_capture * 0.1
+
+                # Update Heartbeat with Rich Stats (Every ~15 frames)
+                if self.frame_count % 15 == 0:
+                     active_sources = [c.get('source', 'Unknown') for c in self.cams]
+                     status = {
+                         "active_cameras": len(self.cams), 
+                         "camera_ids": active_sources,
+                         "fps_real": 1.0/max(0.001, loop_dt),
+                         "perf": {
+                             "Capture (IO)": round(self.perf_stats['capture'] * 1000, 1),
+                             "AI Inference": round(self.perf_stats['inference'] * 1000, 1),
+                             "Visual Overlay": round(self.perf_stats['overlay'] * 1000, 1),
+                             "Idle (Free)": round(self.perf_stats['idle'] * 1000, 1)
+                         }
+                     }
+                     utils.update_heartbeat(status)
+                     
         except Exception as e:
             print(f"\n❌ [CRITICAL ERROR] 시스템 중단: {e}")
             import traceback
@@ -341,13 +420,37 @@ class SilverGuardEngine:
                 except Exception as e:
                     print(f"⚠️ 학습 데이터 저장 실패: {e}")
 
+                # [Fix] Create Snapshot of buffer for Thread Safety
+                # 메인 스레드가 계속 업데이트하는 버퍼를 스레드에서 읽으면 충돌/에러 발생 가능
+                buffer_snapshot = list(cam_data['buffer'])
+
                 if self.is_privacy_mode:
                     safe_img = skeleton_avatar.render_privacy_frame(frame.shape, kpts, confs)
-                    self._trigger_alert(safe_img, cam_data['buffer'], timestamp_override=timestamp)
+                    self._process_alert_async(safe_img, buffer_snapshot, timestamp)
                 else:
-                    self._trigger_alert(frame, cam_data['buffer'], timestamp_override=timestamp)
+                    self._process_alert_async(frame, buffer_snapshot, timestamp)
         else:
             cam_data['fall_state'] = False
+
+    def _process_alert_async(self, frame, buffer, timestamp):
+        """Run alert logic (save, voice, telegram) in a separate thread to prevent UI freeze"""
+        if not hasattr(self, 'is_processing_alert'): 
+            self.is_processing_alert = False
+            
+        if self.is_processing_alert:
+            return
+            
+        self.is_processing_alert = True
+        
+        def worker():
+            try:
+                self._trigger_alert(frame, buffer, timestamp_override=timestamp)
+            except Exception as e:
+                print(f"⚠️ Alert Worker Failed: {e}")
+            finally:
+                self.is_processing_alert = False
+                
+        threading.Thread(target=worker, daemon=True).start()
 
     def _trigger_alert(self, frame, buffer, timestamp_override=None):
         if timestamp_override:
@@ -382,16 +485,18 @@ class SilverGuardEngine:
                 h, w, _ = buffer[0].shape
                 if h <= 0 or w <= 0: raise Exception("Invalid frame dimensions")
 
-                # Try codecs in order: avc1 (H.264) -> h264 -> mp4v -> XVID
-                codecs_to_try = ['avc1', 'h264', 'mp4v', 'XVID']
+                # Try codecs in order: mp4v (Most compatible), XVID (Robust)
+                # Removed 'avc1' to avoid libopenh264 errors on some Windows setups
+                codecs_to_try = ['mp4v', 'XVID']
                 out = None
                 
                 for codec in codecs_to_try:
                     try:
                         fourcc = cv2.VideoWriter_fourcc(*codec)
                         temp_out = cv2.VideoWriter(video_save_path, fourcc, 30.0, (w, h))
+                        
                         if temp_out.isOpened():
-                            print(f"🎥 코덱 '{codec}'으로 영상 저장 시도...")
+                            # print(f"🎥 코덱 '{codec}'으로 영상 저장 시도...")
                             for f in buffer:
                                 temp_out.write(f)
                             temp_out.release()
@@ -401,16 +506,17 @@ class SilverGuardEngine:
 
                 if os.path.exists(video_save_path) and os.path.getsize(video_save_path) > 1000:
                     video_path = video_save_path
-                    print(f"🎥 낙상 영상 저장 완료: {video_path}")
+                    print(f"🎥 낙상 영상 저장 완료")
                 else:
-                    print("⚠️ 영상 파일 생성 실패 (용량 0 or 없음)")
-
+                    print("⚠️ 영상 파일 생성 실패 (코덱 호환성 이슈 가능성)")
             except Exception as e:
                 print(f"⚠️ 영상 저장 실패: {e}")
 
         # Voice Check
         # Pause background listener while active check runs
         stop_continuous_listening()
+        time.sleep(1.0) # [Robustness] Wait for mic to be fully released
+        
         try:
             voice_res = run_voice_emergency_check(save_path)
         finally:
@@ -421,25 +527,28 @@ class SilverGuardEngine:
         alert_msg = f"🚨 낙상 발생! (시간: {readable_time})\n결과: {voice_res}"
 
         # Dispatch Alert
-        if is_internet_available():
-            if time.time() - self.last_alert_time > self.alert_cooldown:
-                # 온라인이면 바로 전송
-                utils.send_telegram_alert(save_path, alert_msg, video_path)
-                
-                # [Auto Call - Windows Phone Link]
-                if self.auto_call_enabled and self.emergency_contact:
-                    phone_nums = str(self.emergency_contact).split(',')
-                    if phone_nums:
-                        utils.make_phone_call(phone_nums[0].strip())
-                
-                self.last_alert_time = time.time()
+        # Dispatch Alert only if NOT Safe
+        if voice_res != "SAFE":
+            if is_internet_available():
+                if time.time() - self.last_alert_time > self.alert_cooldown:
+                    # 온라인이면 바로 전송
+                    utils.send_telegram_alert(save_path, alert_msg, video_path)
+                    
+                    # [Auto Call - Windows Phone Link]
+                    if self.auto_call_enabled and self.emergency_contact:
+                        phone_nums = str(self.emergency_contact).split(',')
+                        if phone_nums:
+                            utils.make_phone_call(phone_nums[0].strip())
+                    
+                    self.last_alert_time = time.time()
+            else:
+                if time.time() - self.last_alert_time > self.alert_cooldown:
+                    # 오프라인이면 대기열에 저장
+                    offline_msg = f"낙상 감지! (시간: {readable_time})\n결과: {voice_res}"
+                    activate_offline_safety_mode(save_path, offline_msg, video_path)
+                    self.last_alert_time = time.time()
         else:
-            if time.time() - self.last_alert_time > self.alert_cooldown:
-                # 오프라인이면 대기열에 저장 (메시지+영상경로 함께 전달)
-                # 오프라인 모드 메시지를 조금 다르게 하고 싶다면 여기서 수정 가능
-                offline_msg = f"낙상 감지! (시간: {readable_time})\n결과: {voice_res}"
-                activate_offline_safety_mode(save_path, offline_msg, video_path)
-                self.last_alert_time = time.time()
+            print("✅ 사용자 확인 결과 '안전'하므로 알림을 전송하지 않습니다.")
 
     def _draw_overlay(self, frame, cam_data):
         detector = cam_data['detector']

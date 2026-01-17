@@ -58,6 +58,53 @@ def save_settings(token, chat_id, contact, privacy_mode, region1, region2, extra
 settings = load_settings()
 default_token = settings.get("TELEGRAM_TOKEN", "")
 default_chat_id = settings.get("TELEGRAM_CHAT_ID", "")
+
+# ==========================================
+# [사이드바] 시스템 모니터링
+# ==========================================
+with st.sidebar:
+    st.title("💻 시스템 리소스 모니터")
+    
+    if os.path.exists(utils.STATUS_PATH):
+        try:
+             with open(utils.STATUS_PATH, 'r', encoding='utf-8') as f:
+                 status = json.load(f)
+                 perf = status.get("perf", {})
+                 fps = status.get("fps_real", 0)
+                 
+                 # Display FPS
+                 st.metric("실시간 FPS", f"{fps:.1f}", help="현재 시스템이 처리하는 초당 프레임 수입니다.")
+                 
+                 if perf:
+                     st.caption("작업별 리소스 점유율 (1프레임 당)")
+                     # Calculate total ms
+                     total_ms = sum(perf.values())
+                     if total_ms > 0:
+                         # AI Inference
+                         inf_ms = perf.get("AI Inference", 0)
+                         st.progress(min(1.0, inf_ms/total_ms), text=f"🤖 AI 분석 ({inf_ms}ms)")
+                         
+                         # Visual Overlay
+                         ovr_ms = perf.get("Visual Overlay", 0)
+                         st.progress(min(1.0, ovr_ms/total_ms), text=f"🎨 화면/아바타 ({ovr_ms}ms)")
+                         
+                         # Capture
+                         cap_ms = perf.get("Capture (IO)", 0)
+                         st.progress(min(1.0, cap_ms/total_ms), text=f"📷 카메라 입력 ({cap_ms}ms)")
+                         
+                         # Idle
+                         idle_ms = perf.get("Idle (Free)", 0)
+                         st.progress(min(1.0, idle_ms/total_ms), text=f"💤 유휴 자원 ({idle_ms}ms)")
+                     else:
+                         st.info("데이터 수집 중...")
+                 else:
+                     st.info("엔진 대기 중...")
+        except Exception as e:
+            st.error(f"모니터링 오류: {e}")
+    else:
+        st.warning("엔진이 실행되지 않았습니다.")
+
+    st.divider()
 default_contact = settings.get("EMERGENCY_CONTACT", "010-0000-0000") # Reverted to original default for contact
 default_privacy = settings.get("PRIVACY_MODE", False)
 default_extra_cam = settings.get("EXTRA_CAM", "")
@@ -195,6 +242,11 @@ with tab1:
             ai_strictness = "Medium"
             if "Low" in strictness_ui: ai_strictness = "Low"
             elif "High" in strictness_ui: ai_strictness = "High"
+            
+            st.divider()
+            st.write("⚙️ 시스템 성능 최적화")
+            default_fps = settings.get("TARGET_FPS", 30)
+            target_fps = st.slider("목표 FPS (낮을수록 리소스 절약)", 5, 60, int(default_fps), 1, help="PC 사양이 낮다면 15~20으로 설정하세요. (권장: 30)")
 
             st.divider()
             telegram_token = st.text_input("텔레그램 봇 토큰", value=default_token, type="password")
@@ -204,16 +256,14 @@ with tab1:
             new_dash_pw = st.text_input("대시보드 접속 비밀번호 변경", value=dashboard_pw, type="password")
 
             if st.form_submit_button("설정 저장"):
-                # Save all
-                if not extra_cam_enabled:
-                     extra_cam = "" # Clear if disabled
-
+                # Save all (정보 손실 방지: 비활성화되어도 내용은 저장)
                 new_settings = {
                     "TELEGRAM_TOKEN": telegram_token,
                     "TELEGRAM_CHAT_ID": chat_id,
                     "EMERGENCY_CONTACT": contact,
                     "PRIVACY_MODE": privacy_mode,
                     "EXTRA_CAM": extra_cam,
+                    "EXTRA_CAM_ENABLED": extra_cam_enabled, # [NEW] 상태 저장
                     "CAM_USER": cam_user,    
                     "CAM_PASS": cam_pass,    
                     "USER_REGION_1": region1, 
@@ -221,6 +271,7 @@ with tab1:
                     "AI_CONFIDENCE": ai_conf,
                     "AI_STRICTNESS": ai_strictness,
                     "AUTO_CALL_ENABLED": auto_call, 
+                    "TARGET_FPS": target_fps, # [NEW]
                     "DASHBOARD_PW": new_dash_pw
                 }
                 with open(utils.SETTINGS_PATH, 'w', encoding='utf-8') as f:
@@ -237,117 +288,253 @@ with tab2:
     if not os.path.exists(utils.ALERT_DIR):
         st.warning("아직 생성된 알림 폴더가 없습니다.")
     else:
-        image_files = sorted([f for f in os.listdir(utils.ALERT_DIR) if f.endswith('.jpg')], reverse=True)
+        # [Fix] Support various image formats and Sort by Modified Time (Newest First)
+        valid_exts = ('.jpg', '.jpeg', '.png')
+        raw_files = [f for f in os.listdir(utils.ALERT_DIR) if f.lower().endswith(valid_exts)]
+        image_files = sorted(raw_files, key=lambda x: os.path.getmtime(os.path.join(utils.ALERT_DIR, x)), reverse=True)
+        
         if not image_files:
-            st.info("현재 감지된 사고 기록이 없습니다.")
+            st.info("현재 처리할 새로운 알림이 없습니다. (모두 분류됨)")
         else:
-            cols = st.columns(3)
-            for idx, file_name in enumerate(image_files):
-                img_path = os.path.join(utils.ALERT_DIR, file_name)
-                try:
-                    image = Image.open(img_path)
+            # --- Batch Actions ---
+            st.write(f"총 {len(image_files)}개의 알림 대기 중")
+            
+            # Select All toggle logic implies session state, but simplified:
+            # just show form or checkboxes.
+            
+            with st.form("batch_process_form"):
+                # [UX Improvement] Action Buttons at TOP
+                st.write("🔽 분류 작업을 선택하세요:")
+                c_top1, c_top2, c_top3 = st.columns(3)
+                
+                # We use variables for button states
+                pressed_verify = c_top1.form_submit_button("⭕ 실제 낙상 승인")
+                pressed_false = c_top2.form_submit_button("❌ 오작동 신고")
+                pressed_delete = c_top3.form_submit_button("🗑️ 선택 삭제")
+                
+                st.divider()
+                
+                cols = st.columns(3)
+                selected_files = []
+                
+                for idx, file_name in enumerate(image_files):
+                    img_path = os.path.join(utils.ALERT_DIR, file_name)
                     with cols[idx % 3]:
-                        st.image(image, caption=f"시간: {file_name[5:-4]}", use_container_width=True)
+                        # 1. Image
+                        try:
+                            image = Image.open(img_path)
+                            st.image(image, caption=f"시간: {file_name[5:-4]}", use_container_width=True)
+                        except: st.error("이미지 로드 실패")
                         
-                        # [Feedback System]
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("⭕ 실제 낙상", key=f"true_{file_name}", help="학습 데이터로 사용하여 감지력을 높입니다."):
-                                # Move to VERIFIED
-                                utils.ensure_dirs()
-                                target_dir = utils.VERIFIED_DIR
-                                base_name = os.path.splitext(file_name)[0]
-                                
-                                # Move JPG
-                                os.rename(img_path, os.path.join(target_dir, file_name))
-                                # Move NPY
-                                npy_name = base_name + ".npy"
-                                if os.path.exists(os.path.join(utils.ALERT_DIR, npy_name)):
-                                    os.rename(os.path.join(utils.ALERT_DIR, npy_name), os.path.join(target_dir, npy_name))
-                                # Move Video
-                                vid_name = base_name.replace("FALL_", "FALL_VIDEO_") + ".mp4"
-                                if os.path.exists(os.path.join(utils.ALERT_DIR, vid_name)):
-                                    os.rename(os.path.join(utils.ALERT_DIR, vid_name), os.path.join(target_dir, vid_name))
-                                
-                                st.success("✅ 학습 데이터로 분류됨")
-                                time.sleep(0.5)
-                                st.rerun()
-                                
-                        with c2:
-                            if st.button("❌ 오작동", key=f"false_{file_name}", help="오작동 데이터로 사용하여 실수를 줄입니다."):
-                                # Move to FALSE_ALARM
-                                utils.ensure_dirs()
-                                target_dir = utils.FALSE_ALARM_DIR
-                                base_name = os.path.splitext(file_name)[0]
-                                
-                                # Move JPG
-                                os.rename(img_path, os.path.join(target_dir, file_name))
-                                # Move NPY
-                                npy_name = base_name + ".npy"
-                                if os.path.exists(os.path.join(utils.ALERT_DIR, npy_name)):
-                                    os.rename(os.path.join(utils.ALERT_DIR, npy_name), os.path.join(target_dir, npy_name))
-                                # Move Video
-                                vid_name = base_name.replace("FALL_", "FALL_VIDEO_") + ".mp4"
-                                if os.path.exists(os.path.join(utils.ALERT_DIR, vid_name)):
-                                    os.rename(os.path.join(utils.ALERT_DIR, vid_name), os.path.join(target_dir, vid_name))
-                                
-                                st.warning("❎ 오작동 사례로 등록됨")
-                                time.sleep(0.5)
-                                st.rerun()
+                        # 2. Checkbox for selection
+                        if st.checkbox(f"선택하기", key=f"chk_{file_name}"):
+                            selected_files.append(file_name)
 
-                        # Just Delete
-                        if st.button(f"🗑️ 영구 삭제 (분류 안함)", key=f"del_{file_name}"):
-                            os.remove(img_path)
-                            video_path = img_path.replace(".jpg", ".mp4").replace("FALL_", "FALL_VIDEO_")
-                            if os.path.exists(video_path):
-                                os.remove(video_path)
-                            npy_path = img_path.replace(".jpg", ".npy")
-                            if os.path.exists(npy_path):
-                                os.remove(npy_path)
-                            st.rerun()
-                except: pass
+                        # 3. Video
+                        base_name = os.path.splitext(file_name)[0]
+                        video_name = base_name.replace("FALL_", "FALL_VIDEO_") + ".mp4"
+                        video_path = os.path.join(utils.ALERT_DIR, video_name)
+                        
+                        if os.path.exists(video_path):
+                            with st.expander("🎬 영상 보기"):
+                                st.video(video_path)
+                
+                st.divider()
+                # Bottom Buttons (Optional backup)
+                c_btm1, c_btm2, c_btm3 = st.columns(3)
+                if c_btm1.form_submit_button("⭕ 실제 낙상 승인 (하단)"): pressed_verify = True
+                if c_btm2.form_submit_button("❌ 오작동 신고 (하단)"): pressed_false = True
+                if c_btm3.form_submit_button("🗑️ 선택 삭제 (하단)"): pressed_delete = True
+
+                # --- Processing Logic ---
+                if pressed_verify:
+                     utils.ensure_dirs()
+                     count = 0
+                     for fname in selected_files:
+                         try:
+                             base = os.path.splitext(fname)[0]
+                             src_img = os.path.join(utils.ALERT_DIR, fname)
+                             dst_dir = utils.VERIFIED_DIR
+                             if os.path.exists(src_img): os.rename(src_img, os.path.join(dst_dir, fname))
+                             
+                             npy_name = base + ".npy"
+                             src_npy = os.path.join(utils.ALERT_DIR, npy_name)
+                             if os.path.exists(src_npy): os.rename(src_npy, os.path.join(dst_dir, npy_name))
+                             
+                             vid_name = base.replace("FALL_", "FALL_VIDEO_") + ".mp4"
+                             src_vid = os.path.join(utils.ALERT_DIR, vid_name)
+                             if os.path.exists(src_vid): os.rename(src_vid, os.path.join(dst_dir, vid_name))
+                             count += 1
+                         except: pass
+                     if count > 0:
+                         st.success(f"{count}개 항목을 '실제 낙상'으로 분류했습니다.")
+                         time.sleep(1)
+                         st.rerun()
+                     else:
+                         st.warning("선택된 항목이 없습니다.")
+
+                if pressed_false:
+                     utils.ensure_dirs()
+                     count = 0
+                     for fname in selected_files:
+                         try:
+                             base = os.path.splitext(fname)[0]
+                             src_img = os.path.join(utils.ALERT_DIR, fname)
+                             dst_dir = utils.FALSE_ALARM_DIR
+                             if os.path.exists(src_img): os.rename(src_img, os.path.join(dst_dir, fname))
+                             
+                             npy_name = base + ".npy"
+                             src_npy = os.path.join(utils.ALERT_DIR, npy_name)
+                             if os.path.exists(src_npy): os.rename(src_npy, os.path.join(dst_dir, npy_name))
+                             
+                             vid_name = base.replace("FALL_", "FALL_VIDEO_") + ".mp4"
+                             src_vid = os.path.join(utils.ALERT_DIR, vid_name)
+                             if os.path.exists(src_vid): os.rename(src_vid, os.path.join(dst_dir, vid_name))
+                             count += 1
+                         except: pass
+                     if count > 0:
+                         st.warning(f"{count}개 항목을 '오작동'으로 분류했습니다.")
+                         time.sleep(1)
+                         st.rerun()
+                     else:
+                         st.warning("선택된 항목이 없습니다.")
+                
+                if pressed_delete:
+                     count = 0
+                     for fname in selected_files:
+                         try:
+                             base = os.path.splitext(fname)[0]
+                             src_img = os.path.join(utils.ALERT_DIR, fname)
+                             if os.path.exists(src_img): os.remove(src_img)
+                             
+                             npy_name = base + ".npy"
+                             src_npy = os.path.join(utils.ALERT_DIR, npy_name)
+                             if os.path.exists(src_npy): os.remove(src_npy)
+                             
+                             vid_name = base.replace("FALL_", "FALL_VIDEO_") + ".mp4"
+                             src_vid = os.path.join(utils.ALERT_DIR, vid_name)
+                             if os.path.exists(src_vid): os.remove(src_vid)
+                             count += 1
+                         except: pass
+                     if count > 0:
+                         st.error(f"{count}개 항목을 삭제했습니다.")
+                         time.sleep(1)
+                         st.rerun()
+                     else:
+                         st.warning("선택된 항목이 없습니다.")
 
 # ==========================================
-# [사이드바] 디버깅 도구
+# [사이드바] 관리자 도구 (학습 및 통계)
 # ==========================================
-st.sidebar.title("🔧 디버깅 도구")
-if st.sidebar.button("🚨 낙상 시뮬레이션 (TEST)"):
-    st.sidebar.warning("⚠️ 낙상 감지 시나리오를 시작합니다...")
+import subprocess
+import sys
+
+# Log file for background training
+TRAIN_LOG_FILE = os.path.join(utils.BASE_DIR, 'train_log.txt')
+
+def is_process_running(pid):
+    """Check if process is running given PID."""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        # Fallback for Windows if psutil not installed
+        try:
+            # os.kill(pid, 0) works on Unix, on Windows it might throw PermissionError or similar
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+with st.sidebar:
+    st.header("🛠️ 관리자 도구")
     
-    # 1. 테스트 이미지 생성 (검은 화면에 텍스트)
-    if not os.path.exists(utils.ALERT_DIR):
-        os.makedirs(utils.ALERT_DIR)
+    st.subheader("📊 데이터 현황")
+    verified_count = len([f for f in os.listdir(utils.VERIFIED_DIR) if f.endswith('.npy')]) if os.path.exists(utils.VERIFIED_DIR) else 0
+    false_count = len([f for f in os.listdir(utils.FALSE_ALARM_DIR) if f.endswith('.npy')]) if os.path.exists(utils.FALSE_ALARM_DIR) else 0
+    
+    col_stat1, col_stat2 = st.columns(2)
+    col_stat1.metric("⭕ 실제 낙상", f"{verified_count}건")
+    col_stat2.metric("❌ 오작동", f"{false_count}건")
+    
+    st.divider()
+    
+    st.subheader("🧠 AI 모델 재학습")
+    st.caption(f"백그라운드에서 학습이 진행됩니다. 설정을 변경해도 끊기지 않습니다.")
+
+    # Check Session State for Training Process
+    current_pid = st.session_state.get('train_pid')
+    is_training = False
+    
+    if current_pid:
+        if is_process_running(current_pid):
+            is_training = True
+        else:
+            # Process finished
+            st.session_state['train_pid'] = None
+            is_training = False
+            # Check exit code or log for success? 
+            # Simplified: Just reset state.
+            st.success("학습 프로세스가 종료되었습니다.")
+
+    if is_training:
+        st.info(f"🔄 학습 진행 중... (PID: {current_pid})")
+        # Tail the log file
+        if os.path.exists(TRAIN_LOG_FILE):
+             with open(TRAIN_LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                 lines = f.readlines()
+                 last_lines = "".join(lines[-15:])
+                 st.code(last_lines, language="bash")
         
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    save_path = os.path.join(utils.ALERT_DIR, f"TEST_FALL_{timestamp}.jpg")
-    
-    # 더미 이미지 생성 (Create blank image)
-    dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
-    # Write text on image
-    cv2.putText(dummy_img, "TEST FALL DETECTION", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    cv2.imwrite(save_path, dummy_img)
-    
-    st.sidebar.write("📸 테스트 이미지 생성 완료")
-    
-    # 2. 텔레그램 전송
-    st.sidebar.write("📤 텔레그램 알림 전송 중...")
-    success = utils.send_telegram_alert(save_path, "🚨 [TEST] 낙상 시뮬레이션 발생!", None)
-    if success:
-        st.sidebar.success("✅ 텔레그램 전송 성공")
+        if st.button("⏹️ 학습 강제 중단"):
+            try:
+                os.kill(current_pid, 9) # SIGKILL
+                st.session_state['train_pid'] = None
+                st.rerun()
+            except:
+                st.error("중단 실패")
+                
+        if st.button("🔄 로그 새로고침"):
+            st.rerun()
+            
     else:
-        st.sidebar.error("❌ 텔레그램 전송 실패")
-        
-    # 3. 음성 모듈 테스트
-    if voice_module:
-        st.sidebar.write("🎙️ 음성 확인 모듈 실행 중... (약 10~20초 소요)")
-        # Streamlit이 멈추는 것을 방지하기 위해 간단히 안내만 표시하고 실행
-        result = voice_module.run_voice_emergency_check(save_path)
-        st.sidebar.info(f"🗣️ 음성 모듈 결과: {result}")
-    else:
-        st.sidebar.error("❌ voice_module을 불러올 수 없습니다.")
-        
-    st.sidebar.success("✅ 시뮬레이션 종료")
-    st.rerun()
+        # Start Button
+        if st.button("🚀 모델 재학습 시작 (Background)", type="primary"):
+            if verified_count == 0 and false_count == 0:
+                st.error("학습할 데이터가 없습니다.")
+            else:
+                try:
+                    # Clear log file
+                    with open(TRAIN_LOG_FILE, "w", encoding="utf-8") as f:
+                        f.write("🚀 Starting Training Process...\n")
+                        
+                    script_path = os.path.join(utils.BASE_DIR, "train_stgcn.py")
+                    
+                    # Launch detached process redirecting output to file
+                    # Windows: We use minimal creation flags to let it run independentish
+                    # But stdout must be the file object
+                    
+                    log_f = open(TRAIN_LOG_FILE, "a", encoding="utf-8")
+                    
+                    proc = subprocess.Popen(
+                        [sys.executable, script_path],
+                        stdout=log_f,
+                        stderr=subprocess.STDOUT,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                        # [Fix] close_fds=True removed to allow log file handle inheritance on Windows
+                    )
+                    
+                    st.session_state['train_pid'] = proc.pid
+                    st.success(f"백그라운드 학습 시작! (PID: {proc.pid})")
+                    time.sleep(1)
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"실행 실패: {e}")
+
+    st.divider()
+    st.subheader("🔐 시스템 제어")
+    st.info("설정이 변경되거나 모델이 학습되면 엔진을 재시작해야 적용됩니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("✉️ 수동 메세지 전송")

@@ -429,24 +429,104 @@ def _lr_index_map(kpts_xy, confs, thr=0.5):
         }
 
 
+import time # [New Import]
+
+# ... existing imports ...
+
+# Global variables for smart capturing
+_prev_frame = None
+_ref_stable_frame = None # [New] Reference frame for drift detection
+_stable_since = 0
+
+def calculate_sharpness(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+def is_scene_stable(current, prev, threshold=10.0):
+    if prev is None: return False
+    # Resize for faster processing
+    h, w = current.shape[:2]
+    curr_small = cv2.resize(current, (64, 64))
+    prev_small = cv2.resize(prev, (64, 64))
+    
+    gray1 = cv2.cvtColor(curr_small, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(prev_small, cv2.COLOR_BGR2GRAY)
+    
+    diff = cv2.absdiff(gray1, gray2)
+    mean_diff = np.mean(diff)
+    return mean_diff < threshold
+
 def draw_virtual_avatar(frame, kpts_xy, confs):
-    global _cached_bg
+    global _cached_bg, _prev_frame, _stable_since, _ref_stable_frame
     load_assets_safe()
 
-    if _cached_bg is None or _cached_bg.shape[:2] != frame.shape[:2]:
-        if os.path.exists(BG_IMAGE_PATH):
-            img = cv2.imread(BG_IMAGE_PATH)
-            if img is not None:
-                _cached_bg = cv2.resize(img, (frame.shape[1], frame.shape[0]))
-                _cached_bg = cv2.convertScaleAbs(_cached_bg, alpha=0.5, beta=0)
-            else:
-                _cached_bg = np.full_like(frame, (30, 30, 30))
+    # 감지 여부 판단 (어깨와 코 기준)
+    is_detected = False
+    if kpts_xy is not None and len(kpts_xy) > 0 and confs is not None:
+        if confs[0] > 0.4 or (confs[5] > 0.4 and confs[6] > 0.4):
+            is_detected = True
+
+    current_time = time.time()
+
+    # [Smart Background Capture]
+    if not is_detected:
+        # 1. Stability Check (움직임이 아주 적을 때만 update)
+        stable = is_scene_stable(frame, _prev_frame, threshold=2.5) 
+        
+        if stable:
+            if _stable_since == 0:
+                _stable_since = current_time
+                _ref_stable_frame = frame.copy() # 기준 프레임 저장
+            
+            # [NEW] Drift Check (서서히 변하는 움직임 감지)
+            if _ref_stable_frame is not None:
+                # 시작 시점과 비교해 너무 많이 변했으면(누적 오차) 리셋
+                if not is_scene_stable(frame, _ref_stable_frame, threshold=8.0):
+                     _stable_since = current_time 
+                     _ref_stable_frame = frame.copy()
+
+            # 2. Duration Check (3.0초 이상 '완벽한' 정적 상태 유지 시)
+            if (current_time - _stable_since) > 3.0:
+                # 3. Sharpness & Change Check
+                sharpness = calculate_sharpness(frame)
+                
+                needs_update = False
+                if _cached_bg is None: needs_update = True
+                # 기존 저장된 배경과 '확실히' 다를 때만 업데이트
+                elif not is_scene_stable(frame, _cached_bg, threshold=15.0): 
+                    needs_update = True
+                
+                if needs_update and sharpness > 50.0:
+                    _cached_bg = frame.copy()
+                    # [Long-term Storage] Save to disk for persistence
+                    try:
+                        cv2.imwrite(BG_IMAGE_PATH, _cached_bg)
+                        print("📸 [Avatar] Clean background captured and saved to disk.")
+                    except: pass
         else:
-            _cached_bg = np.full_like(frame, (30, 30, 30))
+            # 움직임 감지되면 타이머 리셋
+            _stable_since = 0
+            _ref_stable_frame = None
+
+        _prev_frame = frame.copy()
+        
+        # 라이브 뷰 리턴
+        return frame
+    else:
+        # [Fix] 사람이 감지되는 동안은 안정화 타이머 강제 리셋 (퇴장 직후 캡쳐 방지)
+        _stable_since = 0
+        _ref_stable_frame = None
+
+    # 사람이 감지되었으면, 캐시된 배경 사용
+    if _cached_bg is None or _cached_bg.shape[:2] != frame.shape[:2]:
+         _cached_bg = np.full_like(frame, (30, 30, 30)) # Fallback
+    if _cached_bg is None or _cached_bg.shape[:2] != frame.shape[:2]:
+         _cached_bg = np.full_like(frame, (30, 30, 30)) # Fallback
 
     canvas = _cached_bg.copy()
-
-    if kpts_xy is not None and len(kpts_xy) > 0 and confs is not None:
+    
+    # 아바타 합성 시작 (is_detected is True here)
+    if is_detected:
         if confs[5] > 0.5 and confs[6] > 0.5:
             shoulder_w = math.dist(kpts_xy[5], kpts_xy[6])
         else:

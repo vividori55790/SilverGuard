@@ -1,0 +1,16 @@
+🚀 Starting Training Process...
+🚀 Loading CSV files...
+🔄 Processing sequences...
+  0%|          | 0/695 [00:00<?, ?it/s]  2%|▏         | 16/695 [00:00<00:04, 159.40it/s]  9%|▉         | 64/695 [00:00<00:01, 342.78it/s] 15%|█▌        | 107/695 [00:00<00:01, 380.43it/s] 22%|██▏       | 155/695 [00:00<00:01, 418.13it/s] 29%|██▉       | 202/695 [00:00<00:01, 435.52it/s] 35%|███▌      | 246/695 [00:00<00:01, 436.78it/s] 43%|████▎     | 297/695 [00:00<00:00, 458.47it/s] 50%|████▉     | 346/695 [00:00<00:00, 467.75it/s] 58%|█████▊    | 400/695 [00:00<00:00, 488.03it/s] 65%|██████▍   | 451/695 [00:01<00:00, 493.64it/s] 72%|███████▏  | 501/695 [00:01<00:00, 486.68it/s] 80%|███████▉  | 554/695 [00:01<00:00, 496.01it/s] 88%|████████▊ | 615/695 [00:01<00:00, 526.80it/s] 96%|█████████▋| 670/695 [00:01<00:00, 532.84it/s]100%|██████████| 695/695 [00:01<00:00, 475.30it/s]
+🔍 Scanning User Verified Data...
+🌟 Found 39 new field data samples from actual operation!
+📊 Dataset Shape: (13819, 30, 17, 3), Labels: (13819,)
+   - Fall samples: 3132
+   - Normal samples: 10687
+Traceback (most recent call last):
+  File "C:\Users\vivid\Documents\Git Project\PythonUtil\SilverGuard\train_stgcn.py", line 299, in <module>
+    train()
+  File "C:\Users\vivid\Documents\Git Project\PythonUtil\SilverGuard\train_stgcn.py", line 180, in train
+    train_dataset = FallDataset(X_train, y_train)
+                    ^^^^^^^^^^^
+NameError: name 'FallDataset' is not defined

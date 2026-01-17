@@ -1,9 +1,11 @@
-# SilverGuard/utils.py
 import os
 import requests
 import json
 import datetime # 시간 확인을 위해 추가
 import pandas as pd
+import ctypes
+import time
+import shutil # [Fix] Added missing import
 
 # ==================================================
 # [1] 경로 설정
@@ -209,18 +211,126 @@ def is_system_running():
         pass
     return False
 
-def make_phone_call(phone_number):
+
+
+
+def move_alert_to_classified(jpg_path, target_dir):
     """
-    Windows의 'tel:' 프로토콜을 사용하여 기본 전화 앱(휴대폰과 연결)을 실행합니다.
+    낙상 알림 파일들(jpg, npy, mp4)을 지정된 폴더(Verified/FalseAlarm)로 이동시킵니다.
     """
     try:
-        # 전화번호 정제 (숫자만 남기기)
+        ensure_dirs()
+        if not os.path.exists(jpg_path): return False
+        
+        filename = os.path.basename(jpg_path)
+        base_name = os.path.splitext(filename)[0]
+        
+        # Helper to move with overwrite
+        def move_file(src, dst_folder):
+            if os.path.exists(src):
+                dst = os.path.join(dst_folder, os.path.basename(src))
+                if os.path.exists(dst): os.remove(dst)
+                shutil.move(src, dst)
+                return True
+            return False
+
+        # 1. Move JPG
+        move_file(jpg_path, target_dir)
+        
+        # 2. Move NPY
+        npy_name = base_name + ".npy"
+        move_file(os.path.join(ALERT_DIR, npy_name), target_dir)
+        
+        # 3. Move Video
+        vid_name = base_name.replace("FALL_", "FALL_VIDEO_") + ".mp4"
+        move_file(os.path.join(ALERT_DIR, vid_name), target_dir)
+        
+        print(f"📦 데이터 자동 분류 완료: {base_name} -> {target_dir}")
+        return True
+    except Exception as e:
+        print(f"⚠️ 데이터 이동 실패: {e}")
+        return False
+
+def find_and_maximize_window():
+    """휴대폰과 연결 앱 윈도우를 찾아 최상단으로 올리고 최대화합니다."""
+    targets = ["휴대폰과 연결", "Phone Link", "통화", "Call", "Android"]
+    found_hwnd = []
+    
+    def enum_cb(hwnd, _):
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buff = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+        title = buff.value
+        if any(t in title for t in targets):
+            # Check if likely the main window (visible)
+            if ctypes.windll.user32.IsWindowVisible(hwnd):
+                found_hwnd.append(hwnd)
+        return True
+
+    CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+    ctypes.windll.user32.EnumWindows(CMPFUNC(enum_cb), 0)
+    
+    if found_hwnd:
+        hwnd = found_hwnd[0] # First match
+        # SW_MAXIMIZE = 3, SW_RESTORE = 9
+        ctypes.windll.user32.ShowWindow(hwnd, 3) 
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        return True
+    return False
+
+def make_phone_call(phone_number):
+    """
+    Windows의 'tel:' 프로토콜로 전화 앱을 실행하고, 
+    창을 최대화한 뒤 마우스로 통화 버튼을 클릭합니다.
+    """
+    try:
+        # 전화번호 정제
         clean_number = "".join(filter(str.isdigit, str(phone_number)))
         
-        # Windows 명령어 실행 ("tel:01012345678")
-        # 이것은 Windows의 'URL:Tel Protocol'을 트리거하여 '휴대폰과 연결' 앱을 엽니다.
-        os.startfile(f"tel:{clean_number}")
-        print(f"📞 PC에서 전화 발신 요청: {phone_number}")
+        # 1. 앱 실행
+        # tel: 프로토콜로 앱을 호출하되, 빈 내용으로 호출하여 앱을 포커싱
+        os.startfile("tel:")
+        print(f"📞 PC에서 전화 앱 실행 중... (대상: {clean_number})")
+        
+        # 앱 로딩 대기
+        time.sleep(3.0)
+        
+        user32 = ctypes.windll.user32
+        
+        # 2. 창 찾기 및 최대화
+        print("🖥️ 전화 앱 윈도우 최대화 시도...")
+        maximized = False
+        for _ in range(5): 
+            if find_and_maximize_window():
+                maximized = True
+                print("✅ 전화 앱 윈도우를 찾아 최대화했습니다.")
+                break
+            time.sleep(1.0)
+            
+        if not maximized:
+            print("⚠️ 윈도우를 찾지 못했습니다. 키보드 입력이 다른 창으로 갈 수 있습니다.")
+        
+        # 확실히 포커스 잡히도록 대기
+        time.sleep(1.0)
+
+        # 3. 키패드 입력 (한 글자씩 타이핑)
+        print(f"⌨️ 전화번호 키패드 입력 중: {clean_number}")
+        for char in clean_number:
+            if '0' <= char <= '9':
+                vk = ord(char) # 0-9의 ASCII 코드는 가상 키코드와 일치 (0x30~0x39)
+                user32.keybd_event(vk, 0, 0, 0)
+                time.sleep(0.05)
+                user32.keybd_event(vk, 0, 2, 0)
+                time.sleep(0.05)
+        
+        time.sleep(0.5)
+
+        # 4. 엔터 입력 (발신)
+        print("🚀 Enter 키로 통화 시작")
+        user32.keybd_event(0x0D, 0, 0, 0) # Enter Down
+        time.sleep(0.1)
+        user32.keybd_event(0x0D, 0, 2, 0) # Enter Up
+        
         return True
     except Exception as e:
         print(f"❌ 전화 발신 실패: {e}")
